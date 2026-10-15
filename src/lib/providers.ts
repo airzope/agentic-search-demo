@@ -1,3 +1,5 @@
+import type { OcrModelId, OcrSource } from "@/lib/ocr/catalog";
+
 /**
  * LLM provider presets. Shared by server and client, so no secrets here.
  *
@@ -212,7 +214,13 @@ export type PublicEmbedding = {
   queryInstruction: string;
 };
 
-export type PublicOcr = { url: string; lang: string };
+export type PublicOcr = {
+  enabled: boolean;
+  model: OcrModelId;
+  source: OcrSource;
+  baseUrl: string;
+  pypiIndex: string;
+};
 
 export type PublicSettings = {
   connections: PublicConnection[];
@@ -255,7 +263,13 @@ export type SettingsPatch = {
     model?: string | null;
     queryInstruction?: string | null;
   };
-  ocr?: { url?: string | null; lang?: string | null };
+  ocr?: {
+    enabled?: boolean;
+    model?: OcrModelId;
+    source?: OcrSource | null;
+    baseUrl?: string | null;
+    pypiIndex?: string | null;
+  };
   llm?: {
     active?: string | null;
     providers?: Record<

@@ -77,3 +77,35 @@ export function writeStorage(key: string, value: unknown) {
     // ignore
   }
 }
+
+/** POST a form with upload progress (fetch has no upload progress events). */
+export function uploadForm<T>(
+  url: string,
+  form: FormData,
+  onProgress: (loaded: number, total: number) => void,
+): Promise<T> {
+  return new Promise((resolve, reject) => {
+    const xhr = new XMLHttpRequest();
+    xhr.open("POST", url);
+    xhr.upload.onprogress = (event) => {
+      if (event.lengthComputable) onProgress(event.loaded, event.total);
+    };
+    xhr.onload = () => {
+      let body: unknown = null;
+      try {
+        body = JSON.parse(xhr.responseText);
+      } catch {
+        // not JSON
+      }
+      if (xhr.status >= 200 && xhr.status < 300) resolve(body as T);
+      else {
+        const message =
+          (body as { error?: string } | null)?.error ??
+          `${xhr.status} ${xhr.statusText}`.trim();
+        reject(new Error(message));
+      }
+    };
+    xhr.onerror = () => reject(new Error("Upload failed"));
+    xhr.send(form);
+  });
+}

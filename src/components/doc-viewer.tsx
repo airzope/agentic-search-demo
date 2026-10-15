@@ -1,5 +1,6 @@
 "use client";
 
+import { ExternalLinkIcon } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
 
 import { kbPath, useI18n } from "@/components/app-providers";
@@ -70,6 +71,17 @@ export function DocViewer({
           {doc?.path ? <span>/ {doc.path}</span> : null}
           {doc ? (
             <span>· {t("kb.doc.of", { count: doc.chunkCount })}</span>
+          ) : null}
+          {doc?.path && target ? (
+            <a
+              href={`${kbPath(target.kbId)}/files/raw?path=${encodeURIComponent(doc.path)}`}
+              target="_blank"
+              rel="noopener noreferrer"
+              className="text-foreground inline-flex items-center gap-1 font-sans underline-offset-3 hover:underline"
+            >
+              <ExternalLinkIcon className="size-3" />
+              {t("doc.raw")}
+            </a>
           ) : null}
         </DialogDescription>
         <div className="-mx-1 max-h-[65svh] overflow-y-auto px-1">

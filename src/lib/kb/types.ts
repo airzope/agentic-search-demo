@@ -94,6 +94,8 @@ export type KbSummary = {
   embedders: string[];
   config: KbConfig | null;
   job: JobInfo | null;
+  /** Result of the last finished sync (app-managed knowledge bases only). */
+  lastSync: KbDetail["lastSync"];
 };
 
 export type ConnectionStatus = {

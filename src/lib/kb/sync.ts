@@ -40,11 +40,12 @@ import {
   type ChunkDoc,
 } from "@/lib/kb/schema";
 import type { JobInfo, KbConfig } from "@/lib/kb/types";
+import { singleton } from "@/lib/global";
 import { getKbIndex } from "@/lib/meili";
 
 /* ------------------------------------------------------------ manifest */
 
-type ManifestEntry = {
+export type ManifestEntry = {
   size: number;
   mtimeMs: number;
   docId: string;
@@ -66,6 +67,22 @@ export type Manifest = {
 };
 
 const manifestPath = (kbId: string) => path.join(kbDir(kbId), "manifest.json");
+
+/** Parsed manifests for browsing, reused while the file is unchanged. */
+const manifestCache = singleton(
+  "kb-manifest-cache",
+  () => new Map<string, { mtimeMs: number; manifest: Manifest }>(),
+);
+
+export async function readManifestCached(kbId: string): Promise<Manifest> {
+  const info = await stat(manifestPath(kbId)).catch(() => null);
+  if (!info) return { version: 1, files: {}, lastSync: null };
+  const cached = manifestCache.get(kbId);
+  if (cached && cached.mtimeMs === info.mtimeMs) return cached.manifest;
+  const manifest = await readManifest(kbId);
+  manifestCache.set(kbId, { mtimeMs: info.mtimeMs, manifest });
+  return manifest;
+}
 
 export async function readManifest(kbId: string): Promise<Manifest> {
   try {
@@ -247,6 +264,7 @@ export async function runSync(
   config: KbConfig,
   job: JobInfo,
   signal: AbortSignal,
+  { reprocess }: { reprocess?: Set<string> } = {},
 ) {
   const root = sourceRoot(config);
   if (config.source.type === "managed") await mkdir(root, { recursive: true });
@@ -285,7 +303,13 @@ export async function runSync(
       timeout: 0,
       interval: 500,
     });
-    const applied = await index.updateSettings(buildKbSettings(config));
+    const applied = await index.updateSettings({
+      ...buildKbSettings(config),
+      // Turning vectors off has to remove the embedder explicitly.
+      ...(config.embedding.enabled
+        ? {}
+        : { embedders: { [QWEN3_EMBEDDER]: null } }),
+    });
     await client.tasks.waitForTask(applied.taskUid, {
       timeout: 0,
       interval: 500,
@@ -306,6 +330,7 @@ export async function runSync(
     if (!previous) return true;
     if (previous.size !== file.size || previous.mtimeMs !== file.mtimeMs)
       return true;
+    if (reprocess?.has(file.rel)) return true;
     return job.force && previous.status !== "ok";
   });
   job.skipped = files.length - pending.length;
@@ -335,6 +360,9 @@ export async function runSync(
         ocrImages: source.ocrImages,
         ocrEmbedded: source.ocrEmbedded,
         signal: stop.signal,
+        onProgress: (note) => {
+          job.current = `${file.rel} · ${note}`;
+        },
       });
       for (const warning of converted.warnings)
         job.warnings.push(`${file.rel}: ${warning}`);

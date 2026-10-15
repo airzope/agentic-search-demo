@@ -2,3 +2,6 @@ ignoredBuiltDependencies:
   - sharp
   - unrs-resolver
   - node-llama-cpp
+  - onnxruntime-node
+  - "@google/genai"
+  - protobufjs

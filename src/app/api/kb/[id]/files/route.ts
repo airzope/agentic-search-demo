@@ -1,9 +1,61 @@
-import { mkdir, writeFile } from "node:fs/promises";
+import { mkdir, rm, writeFile } from "node:fs/promises";
 import path from "node:path";
 
+import type { NextRequest } from "next/server";
+
+import { listFiles, resolveSourceFile, type FileStatus } from "@/lib/kb/files";
 import { startSync } from "@/lib/kb/jobs";
 import { getKbConfig, managedFilesDir } from "@/lib/kb/registry";
 import { badRequest, handle, kbIdParam } from "@/lib/meili";
+
+/** `?dir=&status=ok|failed|skipped&q=&offset=&limit=` — files known to the last sync. */
+export async function GET(
+  request: NextRequest,
+  context: RouteContext<"/api/kb/[id]/files">,
+) {
+  return handle(async () => {
+    const id = await kbIdParam(context.params);
+    const params = request.nextUrl.searchParams;
+    const status = params.get("status");
+    return Response.json(
+      await listFiles(id, {
+        dir: params.get("dir") ?? "",
+        status: ["ok", "failed", "skipped"].includes(status ?? "")
+          ? (status as FileStatus)
+          : null,
+        q: params.get("q"),
+        offset: Number(params.get("offset")) || 0,
+        limit: Math.min(Number(params.get("limit")) || 100, 500),
+      }),
+    );
+  });
+}
+
+/** Delete uploaded files (managed knowledge bases only), then sync. */
+export async function DELETE(
+  request: Request,
+  context: RouteContext<"/api/kb/[id]/files">,
+) {
+  return handle(async () => {
+    const id = await kbIdParam(context.params);
+    const config = await getKbConfig(id);
+    if (!config) return badRequest("Unknown knowledge base");
+    if (config.source.type !== "managed") {
+      return badRequest(
+        "This knowledge base mirrors a local directory; exclude files instead.",
+      );
+    }
+    const { paths } = (await request.json()) as { paths?: string[] };
+    let removed = 0;
+    for (const rel of paths ?? []) {
+      const target = resolveSourceFile(config, rel);
+      if (!target) continue;
+      await rm(target, { force: true });
+      removed += 1;
+    }
+    return Response.json({ removed, job: startSync(id) });
+  });
+}
 
 /** Safe relative path: no absolute paths, no `..`, no empty segments. */
 function safeRelative(value: string) {

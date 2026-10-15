@@ -41,7 +41,8 @@ export async function browseTree(
       limit: 0,
     }),
     index.search("", {
-      filter: `chunk_index = 0 AND dir = ${quote(branch ?? "")}`,
+      // Meilisearch does not match empty strings with `=`; root files use IS EMPTY.
+      filter: `chunk_index = 0 AND ${branch ? `dir = ${quote(branch)}` : "dir IS EMPTY"}`,
       attributesToRetrieve: DOC_FIELDS,
       limit: docLimit,
     }),

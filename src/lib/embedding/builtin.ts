@@ -1,10 +1,7 @@
 import "server-only";
 
-import { createWriteStream } from "node:fs";
-import { mkdir, open, rename, rm, stat } from "node:fs/promises";
+import { open } from "node:fs/promises";
 import path from "node:path";
-import { Readable } from "node:stream";
-import { pipeline } from "node:stream/promises";
 
 import type {
   Llama,
@@ -13,6 +10,7 @@ import type {
   Token,
 } from "node-llama-cpp";
 
+import { downloadFile, fileSize } from "@/lib/download";
 import { singleton } from "@/lib/global";
 import { BUILTIN_EMBEDDING } from "@/lib/providers";
 import { dataDir, getEmbeddingConfig } from "@/lib/settings";
@@ -67,14 +65,6 @@ const modelPath = () => path.join(modelsDir(), BUILTIN_EMBEDDING.file);
 
 const CONTEXT_SIZE = Number(process.env.EMBEDDING_CONTEXT_SIZE) || 2048;
 
-async function fileSize(file: string) {
-  try {
-    return (await stat(file)).size;
-  } catch {
-    return null;
-  }
-}
-
 export async function builtinStatus(): Promise<BuiltinStatus> {
   const { url } = await getEmbeddingConfig();
   const size = await fileSize(modelPath());
@@ -94,48 +84,28 @@ export async function builtinStatus(): Promise<BuiltinStatus> {
 
 /** Download the GGUF with resume support; validates the GGUF magic bytes. */
 async function download(url: string) {
-  await mkdir(modelsDir(), { recursive: true });
-  const target = modelPath();
-  const partial = `${target}.part`;
-  let offset = (await fileSize(partial)) ?? 0;
-
-  const response = await fetch(url, {
-    headers: offset ? { Range: `bytes=${offset}-` } : {},
-    redirect: "follow",
-  });
-  if (response.status === 416) {
-    // The partial file is already complete.
-  } else if (!response.ok || !response.body) {
-    throw new Error(
-      `Download failed (${response.status} ${response.statusText}) from ${url}. ` +
-        "Try another source (hf-mirror / ModelScope) in Settings, or place the file manually.",
-    );
-  } else {
-    if (offset && response.status !== 206) offset = 0; // range ignored
-    const length = Number(response.headers.get("content-length")) || null;
-    runtime.totalBytes = length !== null ? length + offset : null;
-    runtime.downloadedBytes = offset;
-    const counter = new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        runtime.downloadedBytes += chunk.byteLength;
-        controller.enqueue(chunk);
+  try {
+    await downloadFile(url, modelPath(), {
+      onProgress: (downloaded, total) => {
+        runtime.downloadedBytes = downloaded;
+        runtime.totalBytes = total;
+      },
+      validate: async (file) => {
+        const handle = await open(file, "r");
+        const magic = Buffer.alloc(4);
+        await handle.read(magic, 0, 4, 0);
+        await handle.close();
+        if (magic.toString("latin1") !== "GGUF") {
+          throw new Error(`The downloaded file is not a GGUF model (${url}).`);
+        }
       },
     });
-    await pipeline(
-      Readable.fromWeb(response.body.pipeThrough(counter) as never),
-      createWriteStream(partial, { flags: offset ? "a" : "w" }),
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(
+      `${message}. Try another source (hf-mirror / ModelScope) in Settings, or place the file manually.`,
     );
   }
-
-  const handle = await open(partial, "r");
-  const magic = Buffer.alloc(4);
-  await handle.read(magic, 0, 4, 0);
-  await handle.close();
-  if (magic.toString("latin1") !== "GGUF") {
-    await rm(partial, { force: true });
-    throw new Error(`The downloaded file is not a GGUF model (${url}).`);
-  }
-  await rename(partial, target);
 }
 
 /** Make sure the model file exists, downloading it if needed. */

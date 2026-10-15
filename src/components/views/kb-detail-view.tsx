@@ -23,6 +23,8 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { kbPath, useI18n, useWorkspace } from "@/components/app-providers";
 import { DocViewer, type DocTarget } from "@/components/doc-viewer";
 import { JobProgress } from "@/components/job-progress";
+import { FileExplorer } from "@/components/kb-files";
+import { IndexSettingsEditor, SyncHistory } from "@/components/kb-maintenance";
 import { CheckField, splitList, startKbSync } from "@/components/kb-form";
 import { EmptyState, Page, Section } from "@/components/page";
 import { Button } from "@/components/ui/button";
@@ -39,19 +41,20 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toaster";
 import { KbTypeBadge } from "@/components/views/kb-list-view";
 import { guessLang } from "@/lib/cjk";
-import { api, errorMessage, jsonBody, waitForTask } from "@/lib/client";
+import {
+  api,
+  errorMessage,
+  jsonBody,
+  uploadForm,
+  waitForTask,
+} from "@/lib/client";
 import { fieldText } from "@/lib/display";
+import { formatBytes, formatRelative } from "@/lib/format";
+import type { FileStatus } from "@/lib/kb/files";
 import type { KbDetail, KbDocument, TreeNode } from "@/lib/kb/types";
 import { cn } from "@/lib/utils";
 
 const MAX_IMPORT_BYTES = 100 * 1024 * 1024;
-
-const formatBytes = (bytes: number) =>
-  bytes < 1024
-    ? `${bytes} B`
-    : bytes < 1024 ** 2
-      ? `${(bytes / 1024).toFixed(1)} KB`
-      : `${(bytes / 1024 ** 2).toFixed(1)} MB`;
 
 const notify = (title: string, description?: string) =>
   toast.add({ title, description, type: "error" });
@@ -111,12 +114,13 @@ function Stat({
 function Overview({
   detail,
   reload,
+  onShowFailed,
 }: {
   detail: KbDetail;
   reload: () => Promise<void>;
+  onShowFailed: () => void;
 }) {
-  const { t } = useI18n();
-  const { refreshKbs } = useWorkspace();
+  const { t, lang } = useI18n();
   const config = detail.config;
   const job = detail.job;
 
@@ -166,9 +170,15 @@ function Overview({
           <Stat label={t("kb.connection")}>{detail.connectionName}</Stat>
           {config ? (
             <Stat label={t("kb.stat.lastSync")}>
-              {detail.lastSync
-                ? new Date(detail.lastSync.finishedAt).toLocaleString()
-                : t("kb.neverSynced")}
+              {detail.lastSync ? (
+                <span
+                  title={new Date(detail.lastSync.finishedAt).toLocaleString()}
+                >
+                  {formatRelative(detail.lastSync.finishedAt, lang)}
+                </span>
+              ) : (
+                t("kb.neverSynced")
+              )}
             </Stat>
           ) : null}
           {config?.embedding.model ? (
@@ -196,29 +206,18 @@ function Overview({
         </Section>
       ) : null}
 
-      {detail.failedFiles.length ? (
-        <Section
-          title={`${t("kb.failedFiles")} (${detail.failedFiles.length})`}
+      {detail.lastSync?.failed ? (
+        <button
+          type="button"
+          onClick={onShowFailed}
+          className="border-destructive/30 bg-destructive/5 text-destructive hover:bg-destructive/10 flex items-center gap-2 rounded-lg border px-3 py-2 text-left text-sm"
         >
-          <ul className="flex max-h-60 flex-col gap-1.5 overflow-y-auto text-xs">
-            {detail.failedFiles.map((file) => (
-              <li key={file.path} className="wrap-break-word">
-                <span className="font-mono">{file.path}</span>
-                <span className="text-muted-foreground">: {file.message}</span>
-              </li>
-            ))}
-          </ul>
-        </Section>
+          <CircleAlertIcon className="size-4 shrink-0" />
+          {t("kb.failedLink", { count: detail.lastSync.failed })}
+        </button>
       ) : null}
 
-      {config ? (
-        <ConfigEditor
-          detail={detail}
-          onSaved={async () => {
-            await Promise.all([reload(), refreshKbs()]);
-          }}
-        />
-      ) : null}
+      {config ? <SyncHistory detail={detail} /> : null}
     </div>
   );
 }
@@ -623,6 +622,7 @@ function Uploader({
   const [folder, setFolder] = useState("");
   const [dragging, setDragging] = useState(false);
   const [busy, setBusy] = useState(false);
+  const [progress, setProgress] = useState<number | null>(null);
   const fileInput = useRef<HTMLInputElement>(null);
   const folderInput = useRef<HTMLInputElement>(null);
 
@@ -650,12 +650,11 @@ function Uploader({
         form.append("path", file.webkitRelativePath || file.name);
       }
       form.append("folder", folder);
-      const result = await api<{ saved: string[] }>(
+      setProgress(0);
+      const result = await uploadForm<{ saved: string[] }>(
         `${kbPath(detail.id)}/files`,
-        {
-          method: "POST",
-          body: form,
-        },
+        form,
+        (loaded, size) => setProgress(loaded / size),
       );
       toast.add({ title: t("kb.upload.done", { count: result.saved.length }) });
       setFiles([]);
@@ -664,6 +663,7 @@ function Uploader({
       notify(t("common.error"), errorMessage(reason));
     } finally {
       setBusy(false);
+      setProgress(null);
     }
   };
 
@@ -744,7 +744,9 @@ function Uploader({
         </Button>
         <Button disabled={!files.length || busy} onClick={() => void upload()}>
           {busy ? <Spinner /> : <UploadIcon />}
-          {t("kb.upload.submit")}
+          {progress !== null
+            ? `${Math.round(progress * 100)}%`
+            : t("kb.upload.submit")}
         </Button>
         {files.length ? (
           <Button variant="ghost" onClick={() => setFiles([])}>
@@ -1205,6 +1207,9 @@ export function KbDetailView({ id }: { id: string }) {
   const { detail, error, reload } = useKbDetail(id);
   const [taskKey, setTaskKey] = useState(0);
   const [starting, setStarting] = useState(false);
+  const [tab, setTab] = useState("overview");
+  const [fileStatus, setFileStatus] = useState<FileStatus | null>(null);
+  const [opened, setOpened] = useState<DocTarget | null>(null);
 
   const running =
     detail?.job?.status === "running" || detail?.job?.status === "queued";
@@ -1326,30 +1331,70 @@ export function KbDetailView({ id }: { id: string }) {
         </>
       }
     >
-      <Tabs defaultValue="overview">
+      <Tabs value={tab} onValueChange={(value) => setTab(String(value))}>
         <TabsList>
           <TabsTrigger value="overview">{t("kb.tab.overview")}</TabsTrigger>
           <TabsTrigger value="tree">
-            {detail.schema.chunked ? t("kb.tab.tree") : t("kb.stat.records")}
+            {detail.config
+              ? t("kb.tab.files")
+              : detail.schema.chunked
+                ? t("kb.tab.tree")
+                : t("kb.stat.records")}
           </TabsTrigger>
-          {detail.config ? (
+          {detail.config?.source.type === "managed" ? (
             <TabsTrigger value="upload">{t("kb.tab.upload")}</TabsTrigger>
+          ) : null}
+          {detail.config ? (
+            <TabsTrigger value="settings">{t("kb.tab.settings")}</TabsTrigger>
           ) : null}
           <TabsTrigger value="advanced">{t("kb.tab.advanced")}</TabsTrigger>
         </TabsList>
         <TabsContent value="overview">
-          <Overview detail={detail} reload={reload} />
+          <Overview
+            detail={detail}
+            reload={reload}
+            onShowFailed={() => {
+              setFileStatus("failed");
+              setTab("tree");
+            }}
+          />
         </TabsContent>
-        <TabsContent value="tree">
-          {detail.schema.chunked ? (
+        <TabsContent value="tree" className="flex flex-col gap-4">
+          {detail.config ? (
+            <>
+              <FileExplorer
+                key={fileStatus ?? "all"}
+                detail={detail}
+                initialStatus={fileStatus}
+                onOpenDoc={setOpened}
+                onChanged={reload}
+              />
+            </>
+          ) : detail.schema.chunked ? (
             <TreeBrowser detail={detail} />
           ) : (
             <RecordList detail={detail} />
           )}
         </TabsContent>
-        {detail.config ? (
+        {detail.config?.source.type === "managed" ? (
           <TabsContent value="upload">
             <Uploader detail={detail} reload={reload} />
+          </TabsContent>
+        ) : null}
+        {detail.config ? (
+          <TabsContent value="settings" className="flex flex-col gap-4">
+            <ConfigEditor
+              detail={detail}
+              onSaved={async () => {
+                await Promise.all([reload(), refreshKbs()]);
+              }}
+            />
+            <IndexSettingsEditor
+              detail={detail}
+              onSaved={async () => {
+                await Promise.all([reload(), refreshKbs()]);
+              }}
+            />
           </TabsContent>
         ) : null}
         <TabsContent value="advanced" className="flex flex-col gap-4">
@@ -1369,6 +1414,7 @@ export function KbDetailView({ id }: { id: string }) {
           <DangerZone detail={detail} reload={reload} />
         </TabsContent>
       </Tabs>
+      <DocViewer target={opened} onClose={() => setOpened(null)} />
     </Page>
   );
 }

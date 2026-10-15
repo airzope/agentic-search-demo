@@ -167,8 +167,18 @@ export type UpdateKbInput = {
     watch: boolean;
     maxFileSizeMb: number;
   }>;
+  /** Query/index languages; applied to the index right away. */
+  locales?: string[];
+  /** Chunking and vector changes re-index every file (a rebuild). */
+  chunk?: Partial<{ size: number; overlap: number }>;
+  embedding?: Partial<{ enabled: boolean; dimensions: number }>;
+  scale?: "standard" | "large";
 };
 
+/**
+ * Update a knowledge base. Returns the new config and whether a rebuild was
+ * started because chunking, vectors or scale changed.
+ */
 export async function updateKnowledgeBase(id: string, input: UpdateKbInput) {
   const config = await getKbConfig(id);
   if (!config)
@@ -196,10 +206,63 @@ export async function updateKnowledgeBase(id: string, input: UpdateKbInput) {
       if (patch.watch !== undefined) source.watch = patch.watch;
     }
   }
+  let rebuild = false;
+  if (input.chunk) {
+    const size = clamp(input.chunk.size, 200, 4000, config.chunk.size);
+    const overlap = clamp(input.chunk.overlap, 0, 1000, config.chunk.overlap);
+    if (size !== config.chunk.size || overlap !== config.chunk.overlap) {
+      config.chunk = { size, overlap };
+      rebuild = true;
+    }
+  }
+  if (input.embedding) {
+    const enabled = input.embedding.enabled ?? config.embedding.enabled;
+    let dimensions = clamp(
+      input.embedding.dimensions,
+      32,
+      4096,
+      config.embedding.dimensions,
+    );
+    if (config.embedding.model === BUILTIN_EMBEDDING.id) {
+      dimensions = Math.min(dimensions, BUILTIN_EMBEDDING.dimensions);
+    }
+    if (
+      enabled !== config.embedding.enabled ||
+      (enabled && dimensions !== config.embedding.dimensions)
+    ) {
+      config.embedding = {
+        enabled,
+        dimensions,
+        model: enabled ? await currentEmbeddingModel() : null,
+      };
+      rebuild = true;
+    }
+  }
+  if (input.scale && input.scale !== config.scale) {
+    config.scale = input.scale === "large" ? "large" : "standard";
+    rebuild = true;
+  }
+  let localesChanged = false;
+  if (input.locales) {
+    const locales = input.locales.filter(Boolean);
+    localesChanged = locales.join() !== config.locales.join();
+    config.locales = locales;
+  }
+
   await saveKbConfig(config);
   watchKb(config);
+  if (rebuild) {
+    startSync(id, { rebuild: true });
+  } else if (localesChanged) {
+    const client = await getMeili(config.connectionId);
+    await settle(
+      client.index(config.indexUid).updateSettings({
+        localizedAttributes: buildKbSettings(config).localizedAttributes,
+      }),
+    );
+  }
   invalidateKb(id);
-  return config;
+  return { config, rebuild };
 }
 
 /** Delete a knowledge base: its index (unless kept), registration and managed files. */

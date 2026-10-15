@@ -7,6 +7,7 @@ import {
   FolderSyncIcon,
   PlusIcon,
   RefreshCwIcon,
+  SearchIcon,
   UploadIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -18,10 +19,13 @@ import { KbCreateDialog, startKbSync } from "@/components/kb-form";
 import { EmptyState, Page, RequireIndex, Section } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
+import { Input } from "@/components/ui/input";
+import { Segmented } from "@/components/ui/segmented";
 import { Spinner } from "@/components/ui/spinner";
 import { toast } from "@/components/ui/toaster";
 import { api, errorMessage, jsonBody } from "@/lib/client";
 import type { KbSummary } from "@/lib/kb/types";
+import { formatRelative } from "@/lib/format";
 import { SAMPLE_DATASETS } from "@/lib/samples";
 
 export const kbHref = (id: string) => `/kb/${encodeURIComponent(id)}`;
@@ -53,7 +57,7 @@ export function KbTypeBadge({
 }
 
 function KbCard({ kb }: { kb: KbSummary }) {
-  const { t } = useI18n();
+  const { t, lang } = useI18n();
   const { refreshKbs } = useWorkspace();
   const [starting, setStarting] = useState(false);
   const running = kb.job?.status === "running" || kb.job?.status === "queued";
@@ -121,6 +125,24 @@ function KbCard({ kb }: { kb: KbSummary }) {
           </Badge>
         ) : null}
       </div>
+      {!running && kb.lastSync ? (
+        <p className="text-muted-foreground flex flex-wrap items-center gap-x-2 text-xs">
+          <span title={new Date(kb.lastSync.finishedAt).toLocaleString()}>
+            {t("kb.lastSyncShort", {
+              time: formatRelative(kb.lastSync.finishedAt, lang),
+            })}
+          </span>
+          <span>{t("kb.files", { count: kb.lastSync.files })}</span>
+          {kb.lastSync.failed ? (
+            <Link
+              href={kbHref(kb.id)}
+              className="text-destructive underline-offset-3 hover:underline"
+            >
+              {t("kb.failedShort", { count: kb.lastSync.failed })}
+            </Link>
+          ) : null}
+        </p>
+      ) : null}
       {running && kb.job ? <JobProgress job={kb.job} compact /> : null}
       {!running && kb.job?.status === "failed" ? (
         <p className="text-destructive flex items-start gap-1.5 text-xs">
@@ -221,11 +243,32 @@ function Samples() {
   );
 }
 
+type SortKey = "name" | "size" | "recent";
+
+const SORTERS: Record<SortKey, (a: KbSummary, b: KbSummary) => number> = {
+  name: (a, b) => a.name.localeCompare(b.name),
+  size: (a, b) => b.documents - a.documents,
+  recent: (a, b) =>
+    (b.lastSync?.finishedAt ?? "").localeCompare(a.lastSync?.finishedAt ?? ""),
+};
+
 export function KbListView() {
   const { t } = useI18n();
   const { status, kbs, connections, refreshKbs } = useWorkspace();
   const [creating, setCreating] = useState(false);
+  const [filter, setFilter] = useState("");
+  const [sort, setSort] = useState<SortKey>("name");
   const offline = status !== null && !status.meilisearch.ok;
+  const needle = filter.trim().toLowerCase();
+  const visible = (kbs ?? [])
+    .filter(
+      (kb) =>
+        !needle ||
+        [kb.name, kb.indexUid, kb.description].some((text) =>
+          text.toLowerCase().includes(needle),
+        ),
+    )
+    .sort(SORTERS[sort]);
 
   return (
     <Page
@@ -256,8 +299,39 @@ export function KbListView() {
         </div>
       ) : (
         <>
+          {kbs.length > 3 ? (
+            <div className="flex flex-wrap items-center gap-2">
+              <div className="relative min-w-48 flex-1">
+                <SearchIcon className="text-muted-foreground pointer-events-none absolute top-1/2 left-2.5 size-4 -translate-y-1/2" />
+                <Input
+                  value={filter}
+                  placeholder={t("kb.search")}
+                  aria-label={t("kb.search")}
+                  className="pl-8"
+                  onChange={(event) => setFilter(event.target.value)}
+                />
+              </div>
+              <Segmented<SortKey>
+                size="sm"
+                value={sort}
+                onChange={setSort}
+                options={[
+                  { value: "name", label: t("kb.sort.name") },
+                  { value: "recent", label: t("kb.sort.recent") },
+                  { value: "size", label: t("kb.sort.size") },
+                ]}
+              />
+            </div>
+          ) : null}
+          {needle && !visible.length ? (
+            <p className="text-muted-foreground py-6 text-center text-sm">
+              {t("kb.noMatch")}
+            </p>
+          ) : null}
           {connections.map((connection) => {
-            const items = kbs.filter((kb) => kb.connectionId === connection.id);
+            const items = visible.filter(
+              (kb) => kb.connectionId === connection.id,
+            );
             if (!connection.ok) {
               return (
                 <p
@@ -271,7 +345,8 @@ export function KbListView() {
                 </p>
               );
             }
-            if (!items.length && connections.length > 1) return null;
+            if (!items.length && (connections.length > 1 || needle))
+              return null;
             return (
               <div key={connection.id} className="flex flex-col gap-2">
                 {connections.length > 1 ? (

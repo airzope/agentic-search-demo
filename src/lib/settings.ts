@@ -4,6 +4,12 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  DEFAULT_OCR_MODEL,
+  OCR_MODELS,
+  type OcrModelId,
+  type OcrSource,
+} from "@/lib/ocr/catalog";
+import {
   BUILTIN_EMBEDDING,
   DEFAULT_QUERY_INSTRUCTION,
   PROVIDER_PRESETS,
@@ -47,7 +53,13 @@ type StoredSettings = {
     model?: string;
     queryInstruction?: string;
   };
-  ocr?: { url?: string; lang?: string };
+  ocr?: {
+    enabled?: boolean;
+    model?: OcrModelId;
+    source?: OcrSource;
+    baseUrl?: string;
+    pypiIndex?: string;
+  };
 };
 
 export type ResolvedProvider = {
@@ -181,11 +193,33 @@ export async function getEmbeddingConfig() {
   };
 }
 
+const OCR_MODEL_IDS = OCR_MODELS.map((model) => model.id);
+
 export async function getOcrConfig() {
   const stored = (await readStored()).ocr ?? {};
+  const envModel = env("OCR_MODEL") as OcrModelId | undefined;
+  const model: OcrModelId =
+    stored.model && OCR_MODEL_IDS.includes(stored.model)
+      ? stored.model
+      : envModel && OCR_MODEL_IDS.includes(envModel)
+        ? envModel
+        : DEFAULT_OCR_MODEL;
   return {
-    url: (stored.url ?? env("OCR_URL") ?? "").replace(/\/+$/, ""),
-    lang: stored.lang ?? env("OCR_LANG") ?? "ch",
+    enabled: stored.enabled ?? env("OCR_ENABLED") !== "false",
+    model,
+    source:
+      stored.source ??
+      (env("OCR_MODEL_SOURCE") as OcrSource | undefined) ??
+      ("auto" as OcrSource),
+    baseUrl: (stored.baseUrl ?? env("OCR_MODEL_BASE_URL") ?? "").replace(
+      /\/+$/,
+      "",
+    ),
+    pypiIndex: (
+      stored.pypiIndex ??
+      env("PIP_INDEX_URL") ??
+      "https://pypi.org/simple"
+    ).replace(/\/+$/, ""),
   };
 }
 
@@ -390,8 +424,13 @@ export async function updateSettings(patch: SettingsPatch) {
 
   if (patch.ocr) {
     const ocr = (stored.ocr ??= {});
-    applyField(ocr, "url", patch.ocr.url?.replace(/\/+$/, ""));
-    applyField(ocr, "lang", patch.ocr.lang);
+    if (patch.ocr.enabled !== undefined) ocr.enabled = patch.ocr.enabled;
+    if (patch.ocr.model && OCR_MODEL_IDS.includes(patch.ocr.model)) {
+      ocr.model = patch.ocr.model;
+    }
+    applyField(ocr, "source", patch.ocr.source);
+    applyField(ocr, "baseUrl", patch.ocr.baseUrl?.replace(/\/+$/, ""));
+    applyField(ocr, "pypiIndex", patch.ocr.pypiIndex?.replace(/\/+$/, ""));
   }
 
   await writeStored(stored);

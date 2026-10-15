@@ -1,9 +1,11 @@
 import "server-only";
 
 import { randomUUID } from "node:crypto";
+import { mkdir, readFile, writeFile } from "node:fs/promises";
+import path from "node:path";
 
 import { singleton } from "@/lib/global";
-import { getKbConfig } from "@/lib/kb/registry";
+import { getKbConfig, kbDir } from "@/lib/kb/registry";
 import { runSync } from "@/lib/kb/sync";
 import type { JobInfo } from "@/lib/kb/types";
 
@@ -13,13 +15,79 @@ type JobState = {
   controllers: Map<string, AbortController>;
   /** Knowledge bases that changed while a sync was running. */
   rerun: Set<string>;
+  /** Files to convert again on the next sync, by knowledge base. */
+  reprocess: Map<string, Set<string>>;
 };
 
 const state = singleton<JobState>("kb-jobs", () => ({
   jobs: new Map(),
   controllers: new Map(),
   rerun: new Set(),
+  reprocess: new Map(),
 }));
+
+/* ------------------------------------------------------------ history */
+
+export type SyncRecord = Pick<
+  JobInfo,
+  | "id"
+  | "status"
+  | "rebuild"
+  | "startedAt"
+  | "finishedAt"
+  | "total"
+  | "added"
+  | "updated"
+  | "deleted"
+  | "skipped"
+  | "failed"
+  | "chunks"
+  | "message"
+>;
+
+const historyPath = (kbId: string) => path.join(kbDir(kbId), "history.json");
+const MAX_HISTORY = 30;
+
+export async function readSyncHistory(kbId: string): Promise<SyncRecord[]> {
+  try {
+    const data = JSON.parse(await readFile(historyPath(kbId), "utf8"));
+    return Array.isArray(data) ? data : [];
+  } catch {
+    return [];
+  }
+}
+
+async function recordSync(job: JobInfo) {
+  const record: SyncRecord = {
+    id: job.id,
+    status: job.status,
+    rebuild: job.rebuild,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    total: job.total,
+    added: job.added,
+    updated: job.updated,
+    deleted: job.deleted,
+    skipped: job.skipped,
+    failed: job.failed,
+    chunks: job.chunks,
+    message: job.message,
+  };
+  const history = [record, ...(await readSyncHistory(job.kbId))].slice(
+    0,
+    MAX_HISTORY,
+  );
+  await mkdir(kbDir(job.kbId), { recursive: true });
+  await writeFile(historyPath(job.kbId), JSON.stringify(history));
+}
+
+/** Convert these files again (even if unchanged) on the next sync. */
+export function reprocessFiles(kbId: string, paths: string[]) {
+  const pending = state.reprocess.get(kbId) ?? new Set<string>();
+  for (const rel of paths) pending.add(rel);
+  state.reprocess.set(kbId, pending);
+  return startSync(kbId);
+}
 
 const MAX_KEPT = 100;
 
@@ -92,6 +160,8 @@ export function startSync(
   }
   const job = newJob(kbId, force || rebuild, rebuild);
   const controller = new AbortController();
+  const reprocess = state.reprocess.get(kbId);
+  state.reprocess.delete(kbId);
   state.jobs.set(job.id, job);
   state.controllers.set(job.id, controller);
   while (state.jobs.size > MAX_KEPT) {
@@ -105,7 +175,7 @@ export function startSync(
       const config = await getKbConfig(kbId);
       if (!config)
         throw new Error("This knowledge base has no file source to sync");
-      await runSync(config, job, controller.signal);
+      await runSync(config, job, controller.signal, { reprocess });
       job.status = controller.signal.aborted ? "canceled" : "done";
     } catch (error) {
       job.status = controller.signal.aborted ? "canceled" : "failed";
@@ -116,6 +186,9 @@ export function startSync(
       job.current = null;
       job.finishedAt = new Date().toISOString();
       state.controllers.delete(job.id);
+      await recordSync(job).catch((error) =>
+        console.error(`[kb] could not record sync history`, error),
+      );
       if (state.rerun.delete(kbId) && job.status === "done") startSync(kbId);
     }
   })();

@@ -6,11 +6,12 @@ import path from "node:path";
 import { titleFromMarkdown } from "@/lib/kb/chunk";
 import { extensionOf, kindOf } from "@/lib/kb/formats";
 import {
-  ocrBytes,
-  ocrConfigured,
-  ocrFile,
+  ocrEnabled,
+  ocrImageFile,
+  ocrPdf,
   pagesToMarkdown,
-} from "@/lib/kb/ocr";
+  recognizeImage,
+} from "@/lib/ocr/engine";
 
 /** A source file turned into Markdown plus provenance. */
 export type Converted = {
@@ -111,10 +112,25 @@ const OFFICE_WITH_IMAGES = new Set([
 
 /* ------------------------------------------------------------ convert */
 
+/** Raster formats the OCR engine decodes (plus TIFF, decoded separately). */
+const OCR_IMAGE_TYPES = new Set([
+  "image/png",
+  "image/jpeg",
+  "image/webp",
+  "image/gif",
+  "image/bmp",
+]);
+
 export async function convertFile(
   absolutePath: string,
   relativePath: string,
-  options: { ocrImages: boolean; ocrEmbedded: boolean; signal?: AbortSignal },
+  options: {
+    ocrImages: boolean;
+    ocrEmbedded: boolean;
+    signal?: AbortSignal;
+    /** OCR progress for long scans, e.g. "OCR 3/120". */
+    onProgress?: (note: string) => void;
+  },
 ): Promise<Converted> {
   const kind = kindOf(relativePath);
   const extension = extensionOf(relativePath);
@@ -125,7 +141,10 @@ export async function convertFile(
     const text = markdown.trim();
     if (!text) throw new SkipFile("No text content");
     return {
-      title: titleFromMarkdown(text) ?? fallbackTitle,
+      // OCR output carries "## 第 N 页" headings; they are not titles.
+      title:
+        titleFromMarkdown(text.replace(/^## 第 \d+ 页$/gm, "")) ??
+        fallbackTitle,
       markdown: text,
       source,
       warnings,
@@ -142,12 +161,17 @@ export async function convertFile(
     return finish(text, "text");
   }
 
+  const progress = (done: number, total: number) =>
+    total > 1 && options.onProgress?.(`OCR ${done + 1}/${total}`);
+
   if (kind === "image") {
     if (!options.ocrImages) throw new SkipFile("Image OCR is disabled");
-    if (!(await ocrConfigured()))
-      throw new SkipFile("PaddleOCR service is not configured");
+    if (!(await ocrEnabled()))
+      throw new SkipFile("OCR is turned off in Settings");
     return finish(
-      pagesToMarkdown(await ocrFile(absolutePath, options.signal)),
+      pagesToMarkdown(
+        await ocrImageFile(absolutePath, { onProgress: progress }),
+      ),
       "ocr",
     );
   }
@@ -160,14 +184,29 @@ export async function convertFile(
     } catch (error) {
       const code = (error as { code?: string }).code;
       if (code === "needsOcr") {
-        // Scanned PDF: OCR the whole file locally instead of a hosted service.
-        if (!options.ocrImages || !(await ocrConfigured())) {
-          throw new SkipFile(
-            "Scanned PDF needs OCR, but PaddleOCR is not configured",
+        // Scanned (or partly scanned) PDF: OCR the listed pages in-process,
+        // and use the PDF's own text layer for the rest.
+        if (!options.ocrImages || !(await ocrEnabled())) {
+          throw new SkipFile("Scanned PDF needs OCR, which is turned off");
+        }
+        const { pages, pageCount } = error as {
+          pages?: number[];
+          pageCount?: number;
+        };
+        const ocrPages =
+          pages?.length && pages.length < (pageCount ?? 0) ? pages : null;
+        if (ocrPages) {
+          warnings.push(
+            `OCR on ${ocrPages.length} of ${pageCount} pages (scanned pages)`,
           );
         }
         return finish(
-          pagesToMarkdown(await ocrFile(absolutePath, options.signal)),
+          pagesToMarkdown(
+            await ocrPdf(absolutePath, ocrPages, {
+              onProgress: progress,
+              signal: options.signal,
+            }),
+          ),
           "ocr",
         );
       }
@@ -181,17 +220,20 @@ export async function convertFile(
     if (
       options.ocrEmbedded &&
       OFFICE_WITH_IMAGES.has(extension) &&
-      (await ocrConfigured())
+      (await ocrEnabled())
     ) {
       try {
         const document = await toDocument(await readFile(absolutePath));
         const texts: string[] = [];
-        for (const asset of document.assets) {
-          if (!asset.mediaType.startsWith("image/")) continue;
-          if (asset.data.byteLength < EMBEDDED_IMAGE_MIN_BYTES) continue;
-          const name = `image${asset.id}.${asset.mediaType.split("/")[1] ?? "png"}`;
-          const pages = await ocrBytes(asset.data, name, options.signal);
-          const text = pagesToMarkdown(pages);
+        const images = document.assets.filter(
+          (asset) =>
+            OCR_IMAGE_TYPES.has(asset.mediaType) &&
+            asset.data.byteLength >= EMBEDDED_IMAGE_MIN_BYTES,
+        );
+        for (const [index, asset] of images.entries()) {
+          if (options.signal?.aborted) break;
+          progress(index, images.length);
+          const text = await recognizeImage(asset.data);
           if (text) texts.push(text);
         }
         if (texts.length) {

@@ -1,6 +1,5 @@
 # Local services for CJK Search Studio.
 #   docker compose up -d                    → Meilisearch on http://127.0.0.1:7700
-#   docker compose --profile ocr up -d      → also PaddleOCR on http://127.0.0.1:8866
 #   docker compose --profile ollama up -d   → also Ollama (local LLM + embeddings)
 services:
   meilisearch:
@@ -21,23 +20,6 @@ services:
     volumes:
       - meili_data:/meili_data
 
-  ocr:
-    build:
-      context: ./services/ocr
-      # e.g. https://pypi.tuna.tsinghua.edu.cn/simple for faster installs in China
-      args:
-        PIP_INDEX_URL: ${PIP_INDEX_URL:-https://pypi.org/simple}
-    profiles: ["ocr"]
-    restart: unless-stopped
-    ports:
-      - "127.0.0.1:8866:8866"
-    environment:
-      OCR_LANG: ${OCR_LANG:-ch}
-      # bos (Baidu, fast in China) | huggingface | modelscope | aistudio
-      PADDLE_PDX_MODEL_SOURCE: ${PADDLE_PDX_MODEL_SOURCE:-bos}
-    volumes:
-      - ocr_models:/root/.paddlex
-
   ollama:
     image: ollama/ollama:latest
     profiles: ["ollama"]
@@ -49,5 +31,4 @@ services:
 
 volumes:
   meili_data:
-  ocr_models:
   ollama_data:

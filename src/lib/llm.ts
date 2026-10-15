@@ -1,11 +1,5 @@
 import "server-only";
 
-import { createAnthropic } from "@ai-sdk/anthropic";
-import { createGoogleGenerativeAI } from "@ai-sdk/google";
-import { createOpenAI } from "@ai-sdk/openai";
-import { createOpenAICompatible } from "@ai-sdk/openai-compatible";
-import type { LanguageModel } from "ai";
-
 import {
   resolveActiveProviderId,
   resolveProvider,
@@ -28,31 +22,6 @@ export async function getProvider(providerId?: string | null) {
     throw new LlmConfigError(`${provider.name}: base URL is missing.`);
   }
   return provider;
-}
-
-export function createModel(
-  provider: ResolvedProvider,
-  modelId?: string | null,
-): LanguageModel {
-  const model = modelId?.trim() || provider.model;
-  if (!model) throw new LlmConfigError(`${provider.name}: model is missing.`);
-  const { apiKey, baseURL } = provider;
-
-  switch (provider.kind) {
-    case "openai":
-      return createOpenAI({ apiKey, baseURL })(model);
-    case "anthropic":
-      return createAnthropic({ apiKey, baseURL })(model);
-    case "google":
-      return createGoogleGenerativeAI({ apiKey, baseURL })(model);
-    case "openai-compatible":
-      return createOpenAICompatible({
-        name: provider.id,
-        apiKey,
-        baseURL,
-        includeUsage: true,
-      })(model);
-  }
 }
 
 async function fetchJson(url: string, init: RequestInit) {

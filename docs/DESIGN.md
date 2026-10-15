@@ -161,7 +161,7 @@ pnpm install && pnpm dev      # http://localhost:3000
                     │                                                                  │
 浏览器 ── 搜索/问答 → │ 联邦检索：按连接分组 multi-search（federation）→ 跨连接按得分合并            │
                     └──────────────────────────────────────────────────────────────────┘
-        PaddleOCR 服务（Docker，可选）    Qwen3-Embedding（进程内 llama.cpp，或外部 OpenAI 兼容服务）
+        PaddleOCR（进程内 ONNX Runtime，第三版起）    Qwen3-Embedding（进程内 llama.cpp，或外部 OpenAI 兼容服务）
 ```
 
 - **连接（Connection）**：一个 Meilisearch 实例。`local` 来自原有配置；可以在设置页添加任意数量的云端或远程实例（Meilisearch Cloud、内网服务器）。
@@ -193,7 +193,7 @@ pnpm install && pnpm dev      # http://localhost:3000
 1. **扫描**：遍历目录（默认排除隐藏文件、`node_modules`、`.git`、Office 临时文件，并限制文件大小），与清单（`.data/kb/<id>/manifest.json`，记录 size + mtime）对比，得到新增、修改、删除、未变化四类。
 2. **转换**：
    - Office、PDF、EPUB、RTF、CSV 等格式交给 **anydoc**（`@firecrawl/anydoc`，Rust 原生模块，在本地运行，不阻塞事件循环），输出 Markdown。
-   - 扫描版 PDF（anydoc 返回 `needsOcr`）和图片（png/jpg/webp/bmp/tiff）交给 **PaddleOCR 服务**。可选：对 Word/PPT 中的嵌入图片也做 OCR。不使用 Firecrawl 的云端 OCR，私有文件不出本机。
+   - 扫描版 PDF（anydoc 返回 `needsOcr`）和图片（png/jpg/webp/bmp/gif/tiff）交给 **内置 PaddleOCR**（见第 18 节）。可选：对 Word/PPT 中的嵌入图片也做 OCR。不使用 Firecrawl 的云端 OCR，私有文件不出本机。
    - 纯文本、Markdown、代码、HTML 直接读取，自动识别 UTF-8 / GB18030 / Big5 / Shift_JIS / EUC-KR 编码。
 3. **切块**：按 Markdown 标题分节，再按段落、句子（`。！？；` 等中日韩标点）打包到目标长度（默认 800 字，重叠 100 字）。表格和代码块尽量保持完整，并记录标题路径。
 4. **向量化**：用于嵌入的文本为「标题 + 标题路径 + 正文」，批量计算向量。
@@ -229,7 +229,7 @@ pnpm install && pnpm dev      # http://localhost:3000
 
 - 系统提示中列出所选知识库的名称、说明、文件数和一级分支，模型无需额外调用即可了解知识库的结构。
 - **深度模式**：先拆解为子问题，再多查询检索、精读关键文档、检查信息缺口并补充检索，最后输出结构化答案并给出来源。普通模式最多 8 步，深度模式最多 20 步。
-- 引用格式为 `[n](#doc-<知识库ID>~<doc_id>~<块序号>)`，前端可展开查看来源块。
+- 引用格式见第 17 节（第三版改为对话内统一编号的 `[n]`，一句话可同时引用多个来源）。
 
 ## 16. 大规模优化清单
 
@@ -241,3 +241,49 @@ pnpm install && pnpm dev      # http://localhost:3000
 | 结果     | `distinct: doc_id`；目录树基于分面统计                                                                                           |
 | 资源     | 转换并发 3 路；OCR 与向量化串行排队，避免撑爆内存；大于上限的文件跳过                                                            |
 | 可恢复   | 清单周期性落盘；失败的文件会被记录，可单独重试                                                                                   |
+
+# 第三版：pi agent、内置 OCR、多来源引用与知识库管理
+
+新增需求：融合 pi agent；进一步优化使用体验；回答可以有多个引用；PaddleOCR 内置，不再需要 Docker；完善知识库管理界面。
+
+## 17. 问答智能体：pi agent
+
+- **运行时**：问答的智能体循环改由 [pi](https://github.com/earendil-works/pi) 的 `@earendil-works/pi-agent-core`（`Agent`）驱动，模型调用走 `@earendil-works/pi-ai`。设置页里的 12 家模型服务都映射为 pi 的模型：OpenAI 走 `openai-responses`，Anthropic 走 `anthropic-messages`，Gemini 走 `google-generative-ai`，其余（DeepSeek、通义、Kimi、智谱、豆包、硅基流动、Ollama、自定义）走 `openai-completions`。pi 自带目录里有的模型（OpenAI、Anthropic、Gemini、OpenRouter、DeepSeek、Kimi）使用其上下文长度、推理能力和兼容参数；其余使用通用定义，并为各厂商设置 `compat`（例如通义的 `enable_thinking`、本地服务不用 `developer` 角色）。API Key 由应用设置注入，不读取 pi 的环境变量。
+- **工具**：`search` / `browse` / `read` 定义为 pi 的 `AgentTool`（TypeBox 参数）。同一批工具调用并行执行。超过步数上限后，`beforeToolCall` 拒绝新的调用，让模型基于已有资料作答（普通模式 7 轮，深度模式 16 轮）。
+- **流式桥接**：服务端把 pi 的事件（`message_update` 的文本、思考、工具调用增量，`tool_execution_end`，`turn_start/turn_end`）转换为 AI SDK 的 UI Message Stream。浏览器继续使用 `useChat`，思考过程显示为可折叠的「思考过程」。
+- **对话历史**：浏览器保存的 UI 消息在每次请求时转换回 pi 的消息：每一步拆成「assistant（文本 + 工具调用）→ toolResult」。最近 3 轮保留完整的工具结果，更早的轮次只保留回答文本，控制上下文长度。
+- **补充要求（steering）**：回答进行中，用户在输入框继续输入的内容通过 `POST /api/chat/steer` 交给仍在运行的 `Agent.steer()`。pi 在当前工具批次结束后注入这条消息，模型据此调整检索方向。界面上显示为「↳ 补充要求」。如果回答刚好结束，这条内容会作为下一个问题发送。
+
+### 多来源引用
+
+- 每条检索结果（以及 `read` 读取的段落）获得一个**对话内稳定的编号 `n`**。服务端从历史消息的工具结果中恢复已分配的编号，同一块内容在后续轮次中编号不变，新结果继续递增。
+- 提示词要求模型在每个论断后标注编号，并在多处资料支持同一论断时同时引用，例如 `……需在 14 天内申请[2][5]。`，也接受 `[2, 5]`、`【3】`。
+- 前端把 `[n]` 渲染为可点击的引用标记（跳过代码块），悬停显示来源摘要，点击可打开原文并定位到该块。每个回答下方列出「参考来源」，另列出「检索到但未引用」的结果。复制回答时会附上编号与来源列表。
+
+### 使用体验
+
+- 对话列表保存在浏览器（localStorage），可切换、新建、删除；刷新后恢复当前对话。保存时裁剪较大的工具输出。
+- 回答支持复制、重新回答；底部显示模型、深度模式、token 用量与耗时。
+
+## 18. 内置 PaddleOCR
+
+- **引擎**：[ppu-paddle-ocr](https://github.com/PT-Perkasa-Pilar-Utama/ppu-paddle-ocr) 在 Node.js 进程内用 ONNX Runtime（`onnxruntime-node`）运行 PaddleOCR，不再需要 Python 或 Docker。识别调用串行排队，避免与向量化争抢 CPU。
+- **模型**：默认 PP-OCRv6 标准版（一个模型覆盖简体、繁体中文、英文、日文，约 31 MB）；可选高精度、极速版，以及 PP-OCRv5 韩文模型。首次需要 OCR 时自动下载到 `.data/models/ocr/<模型>/`。
+- **下载源**：「自动」依次尝试 Hugging Face、ModelScope（RapidOCR 的 ONNX 转换）、hf-mirror、PyPI（`rapidocr` 安装包内自带 PP-OCRv6 标准模型，可使用国内 PyPI 镜像）。ModelScope 和 PyPI 的模型把字典存放在 ONNX 元数据里，应用会直接从模型文件中读取字典。离线部署时，直接复制 `.data/models/ocr/` 即可。
+- **扫描版 PDF**：anydoc 会报告哪些页面需要 OCR。应用用 pdf.js 只渲染这些页面（长边约 2200 像素）后再识别，其余页面直接使用 PDF 自带的文字层。多页 TIFF 逐帧解码（utif2）后识别。识别结果按行和段落间距排版，中日韩文字之间不插入空格。
+- 同步任务会实时显示 OCR 进度，例如「扫描件.pdf · OCR 12/120」。
+
+## 19. 知识库管理
+
+| 位置       | 能力                                                                                                                                                                                                   |
+| ---------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| 知识库列表 | 按名称 / 说明筛选；按名称、最近同步、大小排序；卡片显示上次同步时间、文件数和失败数                                                                                                                    |
+| 概览       | 统计、同步进度（可取消）、失败文件入口、最近 30 次同步记录（`.data/kb/<id>/history.json`）                                                                                                             |
+| 文件       | 基于同步清单浏览**所有**文件，包括失败和跳过的文件：按目录逐级浏览，按名称搜索，按状态筛选；每个文件可查看转换后的内容、打开原文件、重新处理、删除（上传的知识库）或排除（映射目录）；支持多选批量操作 |
+| 上传       | 文件或整个文件夹，显示上传进度，可指定子目录                                                                                                                                                           |
+| 设置       | 名称、说明、包含 / 排除规则、OCR 选项、目录监听；以及语言、切块长度与重叠、向量开关与维度、规模。修改切块、向量或规模会自动重建索引；只修改语言则直接更新索引设置                                      |
+| 高级       | 索引设置 JSON、任务记录、重建、删除                                                                                                                                                                    |
+
+- 「重新处理」把文件加入下一次同步的重处理名单（即使文件没有变化）；同步进行中提交的请求会在当前任务结束后自动再跑一次。
+- 「排除」把文件或目录的相对路径加入排除规则，下次同步时删除对应内容，原文件不受影响。
+- 原文件下载接口只允许访问知识库来源目录内的文件。

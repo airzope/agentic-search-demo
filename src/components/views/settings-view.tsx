@@ -16,6 +16,7 @@ import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import { useI18n, useWorkspace } from "@/components/app-providers";
 import { useTheme } from "@/components/app-shell";
+import { CheckField } from "@/components/kb-form";
 import { Page, Section } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -38,6 +39,13 @@ import {
   type SettingsPatch,
 } from "@/lib/providers";
 
+import type { MessageKey } from "@/lib/i18n";
+import {
+  OCR_MODELS,
+  OCR_SOURCES,
+  type OcrModelId,
+  type OcrSource,
+} from "@/lib/ocr/catalog";
 import type { Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
@@ -1019,13 +1027,59 @@ function EmbeddingSettings({
 
 /* ------------------------------------------------------------------- ocr */
 
-const OCR_LANGS = [
-  { value: "ch", label: "ch · 中文 / English / 日本語" },
-  { value: "chinese_cht", label: "chinese_cht · 繁體中文" },
-  { value: "japan", label: "japan · 日本語" },
-  { value: "korean", label: "korean · 한국어" },
-  { value: "en", label: "en · English" },
-];
+type OcrStatus = PublicSettings["ocr"] & {
+  state:
+    | "disabled"
+    | "missing"
+    | "downloading"
+    | "downloaded"
+    | "loading"
+    | "ready"
+    | "error";
+  installed: { model: string; source: string; installedAt: string } | null;
+  progress: {
+    source: string | null;
+    file: string | null;
+    downloaded: number;
+    total: number | null;
+  };
+  error: string | null;
+};
+
+function OcrState({ status }: { status: OcrStatus }) {
+  const { t } = useI18n();
+  const { progress } = status;
+  const amount = progress.total
+    ? `${Math.floor((progress.downloaded / progress.total) * 100)}%`
+    : `${(progress.downloaded / 1024 ** 2).toFixed(1)} MB`;
+  const label =
+    status.state === "downloading"
+      ? t("ocr.state.downloading", {
+          source: progress.source
+            ? t(`ocr.source.${progress.source}` as MessageKey)
+            : "",
+          pct: amount,
+        })
+      : status.state === "error"
+        ? t("emb.state.error", { error: status.error ?? "" })
+        : t(`ocr.state.${status.state}` as MessageKey);
+  const variant =
+    status.state === "ready"
+      ? "success"
+      : status.state === "error"
+        ? "destructive"
+        : status.state === "missing" || status.state === "disabled"
+          ? "outline"
+          : "warning";
+  return (
+    <Badge variant={variant} className="max-w-full whitespace-normal">
+      {status.state === "downloading" || status.state === "loading" ? (
+        <Spinner className="size-3" />
+      ) : null}
+      {label}
+    </Badge>
+  );
+}
 
 function OcrSettings({
   settings,
@@ -1035,34 +1089,60 @@ function OcrSettings({
   onSaved: (settings: PublicSettings) => void;
 }) {
   const { t } = useI18n();
-  const [url, setUrl] = useState(settings.url);
-  const [lang, setLang] = useState(settings.lang || "ch");
-  const [health, setHealth] = useState<{ ok: boolean; error?: string } | null>(
-    null,
-  );
+  const [enabled, setEnabled] = useState(settings.enabled);
+  const [model, setModel] = useState<OcrModelId>(settings.model);
+  const [source, setSource] = useState<OcrSource>(settings.source);
+  const [baseUrl, setBaseUrl] = useState(settings.baseUrl);
+  const [pypiIndex, setPypiIndex] = useState(settings.pypiIndex);
+  const [status, setStatus] = useState<OcrStatus | null>(null);
   const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
 
-  const check = useCallback(async () => {
-    setHealth(null);
+  const load = useCallback(async () => {
     try {
-      setHealth(await api<{ ok: boolean; error?: string }>("/api/ocr"));
-    } catch (error) {
-      setHealth({ ok: false, error: errorMessage(error) });
+      setStatus(await api<OcrStatus>("/api/ocr"));
+    } catch {
+      setStatus(null);
     }
   }, []);
 
   useEffect(() => {
     // Async loader: state is only set after the request resolves.
     // eslint-disable-next-line react-hooks/set-state-in-effect
-    void check();
-  }, [check]);
+    void load();
+  }, [load]);
+
+  const busy = status?.state === "downloading" || status?.state === "loading";
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(() => void load(), 1000);
+    return () => clearInterval(timer);
+  }, [busy, load]);
+
+  const dirty =
+    enabled !== settings.enabled ||
+    model !== settings.model ||
+    source !== settings.source ||
+    baseUrl !== settings.baseUrl ||
+    pypiIndex !== settings.pypiIndex;
 
   const save = async () => {
     setSaving(true);
     try {
-      onSaved(await saveSettings({ ocr: { url: url.trim() || null, lang } }));
+      onSaved(
+        await saveSettings({
+          ocr: {
+            enabled,
+            model,
+            source,
+            baseUrl: baseUrl.trim() || null,
+            pypiIndex: pypiIndex.trim() || null,
+          },
+        }),
+      );
+      await load();
       toast.add({ title: t("settings.saved") });
-      await check();
     } catch (error) {
       notifyError(t("common.error"), error);
     } finally {
@@ -1070,61 +1150,161 @@ function OcrSettings({
     }
   };
 
+  const action = async (name: "download" | "load") => {
+    try {
+      setStatus(
+        await api<OcrStatus>("/api/ocr", {
+          method: "POST",
+          body: jsonBody({ action: name }),
+        }),
+      );
+      setTimeout(() => void load(), 300);
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    }
+  };
+
+  const test = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api<{ text: string; latencyMs: number }>(
+        "/api/ocr",
+        { method: "POST", body: jsonBody({ action: "test" }) },
+      );
+      setTestResult(
+        t("ocr.testOk", {
+          ms: result.latencyMs,
+          text: result.text.replace(/\s+/g, " "),
+        }),
+      );
+      await load();
+    } catch (error) {
+      setTestResult(errorMessage(error));
+      await load();
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const modelInfo = OCR_MODELS.find((item) => item.id === model);
+  const sources: OcrSource[] = [...OCR_SOURCES, "custom"];
+
   return (
     <Section
       title={t("ocr.title")}
-      description={t("ocr.hint")}
-      actions={
-        health === null ? (
-          <Spinner />
-        ) : health.ok ? (
-          <Badge variant="success">
-            <CheckIcon />
-            {t("ocr.ok")}
-          </Badge>
-        ) : (
-          <Badge
-            variant="destructive"
-            title={health.error}
-            className="max-w-64 truncate"
-          >
-            <CircleAlertIcon />
-            {t("ocr.fail", { error: health.error ?? "" })}
-          </Badge>
-        )
-      }
+      description={t("ocr.desc")}
+      actions={status ? <OcrState status={status} /> : <Spinner />}
     >
-      <form
-        className="grid items-end gap-3 sm:grid-cols-[1fr_16rem_auto]"
-        onSubmit={(event) => {
-          event.preventDefault();
-          void save();
-        }}
-      >
-        <Field label={t("ocr.url")}>
-          <Input
-            value={url}
-            placeholder="http://127.0.0.1:8866"
-            onChange={(event) => setUrl(event.target.value)}
-          />
-        </Field>
-        <Field label={t("ocr.lang")}>
+      <CheckField checked={enabled} onChange={setEnabled}>
+        {t("ocr.enabled")}
+      </CheckField>
+      <div className="grid gap-3 sm:grid-cols-2">
+        <Field label={t("ocr.model")}>
           <NativeSelect
-            value={lang}
-            onChange={(event) => setLang(event.target.value)}
+            value={model}
+            disabled={!enabled}
+            onChange={(event) => setModel(event.target.value as OcrModelId)}
           >
-            {OCR_LANGS.map((item) => (
-              <option key={item.value} value={item.value}>
-                {item.label}
+            {OCR_MODELS.map((item) => (
+              <option key={item.id} value={item.id}>
+                {t(`ocr.model.${item.id}` as MessageKey)} · ~{item.sizeMb} MB
               </option>
             ))}
           </NativeSelect>
         </Field>
-        <Button type="submit" disabled={saving}>
+        <Field label={t("ocr.source")}>
+          <NativeSelect
+            value={source}
+            disabled={!enabled}
+            onChange={(event) => setSource(event.target.value as OcrSource)}
+          >
+            {sources.map((item) => (
+              <option
+                key={item}
+                value={item}
+                disabled={
+                  item !== "auto" && !modelInfo?.sources.includes(item as never)
+                }
+              >
+                {t(`ocr.source.${item}` as MessageKey)}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+      </div>
+      {source === "custom" ? (
+        <Field label={t("ocr.baseUrl")} hint={t("ocr.baseUrl.hint")}>
+          <Input
+            value={baseUrl}
+            placeholder="https://example.com/ppu-paddle-ocr-models"
+            onChange={(event) => setBaseUrl(event.target.value)}
+          />
+        </Field>
+      ) : null}
+      {source === "pypi" || source === "auto" ? (
+        <Field label={t("ocr.pypiIndex")} hint={t("ocr.pypiIndex.hint")}>
+          <Input
+            value={pypiIndex}
+            placeholder="https://pypi.org/simple"
+            onChange={(event) => setPypiIndex(event.target.value)}
+          />
+        </Field>
+      ) : null}
+      {status?.installed ? (
+        <p className="text-muted-foreground text-xs">
+          {t("ocr.installed", {
+            source: t(`ocr.source.${status.installed.source}` as MessageKey),
+            time: new Date(status.installed.installedAt).toLocaleString(),
+          })}
+        </p>
+      ) : null}
+      <div className="flex flex-wrap items-center gap-2">
+        <Button
+          size="sm"
+          disabled={saving || !dirty}
+          onClick={() => void save()}
+        >
           {saving ? <Spinner /> : null}
           {t("common.save")}
         </Button>
-      </form>
+        {status &&
+        !dirty &&
+        (status.state === "missing" || status.state === "error") ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void action("download")}
+          >
+            <DownloadIcon />
+            {t("ocr.download", { size: modelInfo?.sizeMb ?? "" })}
+          </Button>
+        ) : null}
+        {status && !dirty && status.state === "downloaded" ? (
+          <Button
+            size="sm"
+            variant="outline"
+            onClick={() => void action("load")}
+          >
+            {t("emb.load")}
+          </Button>
+        ) : null}
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={testing || dirty || !enabled || busy}
+          onClick={() => void test()}
+        >
+          {testing ? <Spinner /> : <PlugZapIcon />}
+          {t("emb.test")}
+        </Button>
+        {testResult ? (
+          <span className="text-muted-foreground text-xs wrap-break-word">
+            {testResult}
+          </span>
+        ) : null}
+      </div>
+      <p className="text-muted-foreground text-xs">{t("ocr.offline")}</p>
     </Section>
   );
 }

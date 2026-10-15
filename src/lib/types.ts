@@ -17,4 +17,11 @@ export type StatusInfo = {
   llm: { active: string | null };
 };
 
-export type ChatMetadata = { provider: string; model: string; deep?: boolean };
+export type ChatMetadata = {
+  provider: string;
+  model: string;
+  deep?: boolean;
+  /** Tokens across every model call of the run. */
+  usage?: { input: number; output: number };
+  durationMs?: number;
+};

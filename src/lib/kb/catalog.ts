@@ -5,6 +5,7 @@ import { singleton } from "@/lib/global";
 import { activeJob, latestJob } from "@/lib/kb/jobs";
 import { getKbConfig, listKbConfigs } from "@/lib/kb/registry";
 import { detectSchema, type IndexSchema } from "@/lib/kb/schema";
+import { readManifestCached } from "@/lib/kb/sync";
 import type { ConnectionStatus, KbConfig, KbSummary } from "@/lib/kb/types";
 import {
   getKbIndex,
@@ -138,6 +139,10 @@ export async function listKnowledgeBases() {
               embedders: schema.embedders,
               config,
               job: activeJob(id) ?? latestJob(id),
+              lastSync: config
+                ? ((await readManifestCached(id).catch(() => null))?.lastSync ??
+                  null)
+                : null,
             });
           }),
         );
