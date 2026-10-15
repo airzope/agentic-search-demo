@@ -10,34 +10,84 @@ import {
 import { z } from "zod";
 
 import { stripHighlights } from "@/lib/cjk";
-import { fieldText } from "@/lib/display";
+import { browseTree, readDocument } from "@/lib/kb/browse";
+import { describeKb } from "@/lib/kb/catalog";
+import { parseRef, retrieve, type KbHit } from "@/lib/kb/retrieve";
 import { LlmConfigError, createModel, getProvider } from "@/lib/llm";
-import { getMeili, isValidIndexUid } from "@/lib/meili";
-import { buildSearchParams, defaultLocales, describeIndex } from "@/lib/search";
-import type {
-  ChatHit,
-  ChatMetadata,
-  SearchHit,
-  SearchPrefs,
-} from "@/lib/types";
+import { parseKbId } from "@/lib/meili";
+import type { ChatMetadata, SearchPrefs } from "@/lib/types";
 
-export const maxDuration = 120;
+export const maxDuration = 300;
 
 type ChatBody = {
   messages: UIMessage[];
-  indexUid?: string;
+  kbs?: string[];
   provider?: string;
   model?: string;
   search?: Partial<SearchPrefs>;
+  /** Deep research mode for complex questions. */
+  deep?: boolean;
 };
-
-const MAX_FIELD_CHARS = 4000;
 
 function errorText(error: unknown) {
   if (error instanceof Error && error.message.trim()) return error.message;
   if (typeof error === "string" && error.trim()) return error;
   return "An error occurred.";
 }
+
+const compactHit = (hit: KbHit) => ({
+  ref: hit.ref,
+  kb: hit.kbName,
+  title: stripHighlights(hit.titleHighlighted || hit.title),
+  path: hit.path ?? undefined,
+  heading: hit.heading ?? undefined,
+  snippet: stripHighlights(hit.snippet).slice(0, 600),
+  score: Math.round(hit.score * 1000) / 1000,
+  ...(Object.keys(hit.fields).length ? { fields: hit.fields } : {}),
+});
+
+/** Short description of each knowledge base for the system prompt. */
+async function catalog(kbIds: string[]) {
+  const lines = await Promise.all(
+    kbIds.slice(0, 20).map(async (id) => {
+      try {
+        const kb = await describeKb(id);
+        let detail = `${kb.stats.numberOfDocuments} documents`;
+        if (kb.schema.chunked) {
+          const tree = await browseTree(id, null, 0);
+          const folders = tree.children
+            .sort((a, b) => b.docs - a.docs)
+            .slice(0, 12)
+            .map((node) => `${node.name}(${node.docs})`)
+            .join(", ");
+          detail = `${tree.totalDocs} files${folders ? `; top folders: ${folders}` : ""}`;
+        }
+        const description = kb.config?.description
+          ? ` — ${kb.config.description}`
+          : "";
+        return `- ${id} — ${kb.name}${description} — ${detail}`;
+      } catch (error) {
+        return `- ${id} — unavailable (${errorText(error)})`;
+      }
+    }),
+  );
+  return lines.join("\n");
+}
+
+const BASE_RULES = `Rules:
+- Ground every answer in retrieved content. Cite each factual statement inline as [n](#doc-<ref>) using the exact "ref" from tool results; number distinct sources in order of first use.
+- For Chinese, Japanese or Korean, prefer short key terms (2-6 characters) and try synonyms, abbreviations and full names as separate queries.
+- When the question targets a specific area, restrict search with "kbs" or "branch" (a folder path from browse or from result paths).
+- Snippets are excerpts. When details matter (tables, steps, numbers, conditions), call read on the most relevant refs.
+- If the knowledge bases do not contain the answer, say so plainly instead of guessing.
+- Reply in the same language as the user's latest message.`;
+
+const DEEP_RULES = `Deep research mode — the question may be complex:
+1. Plan: first write a short list of the sub-questions you must answer.
+2. Retrieve broadly: call search with 3-5 queries per call covering the sub-questions; use browse when the folder structure helps narrow down.
+3. Read: open the 2-5 most relevant documents with read before answering.
+4. Check gaps and conflicts: search again for anything still missing, with different wording.
+5. Answer with a structured synthesis (headings, bullets, or a table when comparing). Point out conflicting sources and remaining uncertainty.`;
 
 export async function POST(request: Request) {
   let body: ChatBody;
@@ -48,133 +98,163 @@ export async function POST(request: Request) {
   }
 
   try {
-    if (!body.indexUid || !isValidIndexUid(body.indexUid)) {
-      return new Response("Select an index first.", { status: 400 });
+    const kbIds = [...new Set((body.kbs ?? []).map((id) => parseKbId(id).id))];
+    if (!kbIds.length) {
+      return new Response("Select at least one knowledge base.", {
+        status: 400,
+      });
     }
     const provider = await getProvider(body.provider);
     const modelId = body.model?.trim() || provider.model;
     const model = createModel(provider, modelId);
+    const prefs = body.search ?? {};
+    const deep = Boolean(body.deep);
 
-    const index = (await getMeili()).index(body.indexUid);
-    const meta = await describeIndex(index);
-    const primaryKey = meta.primaryKey ?? "id";
-    const { title, content } = meta.display;
-    const filterable = (meta.settings.filterableAttributes ?? []).filter(
-      (attribute): attribute is string => typeof attribute === "string",
-    );
-    const prefs: Partial<SearchPrefs> = {
-      ...body.search,
-      locales: body.search?.locales?.length
-        ? body.search.locales
-        : defaultLocales(meta.settings.localizedAttributes),
+    const allowed = (ids?: string[]) => {
+      const picked = (ids ?? []).filter((id) => kbIds.includes(id));
+      return picked.length ? picked : kbIds;
     };
-
-    const toChatHit = (hit: SearchHit): ChatHit => {
-      const formatted = hit._formatted ?? {};
-      const fields: Record<string, string> = {};
-      for (const [key, value] of Object.entries(hit)) {
-        if (key.startsWith("_") || [primaryKey, title, content].includes(key))
-          continue;
-        const text = fieldText(value);
-        if (text && text.length <= 120 && Object.keys(fields).length < 6) {
-          fields[key] = text;
-        }
-      }
-      return {
-        id: fieldText(hit[primaryKey]),
-        title: title ? fieldText(hit[title]) : "",
-        snippet: stripHighlights(
-          fieldText(content ? (formatted[content] ?? hit[content]) : ""),
-        ).slice(0, 500),
-        score:
-          typeof hit._rankingScore === "number"
-            ? Math.round(hit._rankingScore * 1000) / 1000
-            : undefined,
-        fields,
-      };
+    const ensureAllowed = (id: string) => {
+      const kbId = parseKbId(id).id;
+      if (!kbIds.includes(kbId))
+        throw new Error(`Knowledge base not selected: ${id}`);
+      return kbId;
     };
-
-    const searchInput = z.object({
-      query: z
-        .string()
-        .min(1)
-        .max(200)
-        .describe("Keywords or a short natural-language query"),
-      limit: z
-        .number()
-        .int()
-        .min(1)
-        .max(20)
-        .optional()
-        .describe("Number of results, default 8"),
-      ...(filterable.length
-        ? {
-            filter: z
-              .string()
-              .max(500)
-              .optional()
-              .describe(
-                `Optional Meilisearch filter, e.g. ${filterable[0]} = "value". Filterable attributes: ${filterable.join(", ")}`,
-              ),
-          }
-        : {}),
-    });
 
     const tools = {
-      search_documents: tool({
-        description: `Search the "${meta.uid}" index (${prefs.mode ?? "keyword"} search). Returns matching documents with id, title and snippet.`,
-        inputSchema: searchInput,
-        execute: async (input) => {
-          const { query, limit } = input;
-          const filter = (input as { filter?: string }).filter;
-          const response = await index.search(
-            query,
-            buildSearchParams(prefs, {
-              limit: limit ?? 8,
-              filter: filter || undefined,
-            }),
+      search: tool({
+        description:
+          "Search the selected knowledge bases (hybrid keyword + semantic). Pass several focused queries at once; they run in parallel and duplicates across queries are marked.",
+        inputSchema: z.object({
+          queries: z.array(z.string().min(1).max(200)).min(1).max(5),
+          kbs: z
+            .array(z.string())
+            .optional()
+            .describe(
+              "Restrict to these knowledge base ids (default: all selected)",
+            ),
+          branch: z
+            .string()
+            .optional()
+            .describe(
+              "Folder path to restrict to, e.g. 产品/手册 (chunked knowledge bases only)",
+            ),
+          limit: z
+            .number()
+            .int()
+            .min(1)
+            .max(10)
+            .optional()
+            .describe("Results per query, default 6"),
+        }),
+        execute: async ({ queries, kbs, branch, limit }) => {
+          const targets = allowed(kbs);
+          const seen = new Set<string>();
+          const results = await Promise.all(
+            queries.map((q) =>
+              retrieve({
+                kbIds: targets,
+                q,
+                prefs,
+                branch,
+                limit: limit ?? 6,
+                cropLength: 80,
+              }),
+            ),
           );
           return {
-            query,
-            total: response.estimatedTotalHits ?? response.hits.length,
-            hits: response.hits.map(toChatHit),
+            results: results.map((result, at) => ({
+              query: queries[at],
+              total: result.estimatedTotalHits,
+              hits: result.hits.map((hit) => {
+                if (seen.has(hit.ref)) return { ref: hit.ref, duplicate: true };
+                seen.add(hit.ref);
+                return compactHit(hit);
+              }),
+              ...(result.warnings.length ? { warnings: result.warnings } : {}),
+              ...(result.errors.length ? { errors: result.errors } : {}),
+            })),
           };
         },
       }),
-      get_document: tool({
-        description: "Fetch one full document by its id.",
+      browse: tool({
+        description:
+          "List the folders (with file counts) and files of a knowledge base folder, to understand its structure.",
         inputSchema: z.object({
-          id: z.string().min(1).describe("Document id from search results"),
+          kb: z.string().describe("Knowledge base id"),
+          branch: z
+            .string()
+            .optional()
+            .describe("Folder path; omit for the top level"),
         }),
-        execute: async ({ id }) => {
-          const document = await index.getDocument(id);
-          return Object.fromEntries(
-            Object.entries(document)
-              .filter(([key]) => !key.startsWith("_"))
-              .map(([key, value]) => {
-                const text = fieldText(value);
-                return [
-                  key,
-                  text.length > MAX_FIELD_CHARS
-                    ? `${text.slice(0, MAX_FIELD_CHARS)}…`
-                    : value,
-                ];
-              }),
+        execute: async ({ kb, branch }) => {
+          const kbId = ensureAllowed(kb);
+          const tree = await browseTree(kbId, branch || null, 40);
+          return {
+            branch: tree.branch ?? "/",
+            totalFiles: tree.totalDocs,
+            folders: tree.children.map((node) => ({
+              branch: node.branch,
+              files: node.docs,
+            })),
+            files: tree.documents.map((doc) => ({
+              ref: `${kbId}~${doc.doc_id}`,
+              title: doc.title,
+              path: doc.path,
+            })),
+          };
+        },
+      }),
+      read: tool({
+        description:
+          "Read a document by ref: the whole text, or only the chunks around a search hit (around_hit_only).",
+        inputSchema: z.object({
+          ref: z.string().describe("A ref from search or browse results"),
+          around_hit_only: z
+            .boolean()
+            .optional()
+            .describe("Only read a few chunks around the hit's chunk"),
+          max_chars: z.number().int().min(1000).max(12000).optional(),
+        }),
+        execute: async ({ ref, around_hit_only, max_chars }) => {
+          const parsed = parseRef(ref);
+          if (!parsed) throw new Error(`Invalid ref: ${ref}`);
+          const document = await readDocument(
+            ensureAllowed(parsed.kbId),
+            parsed.docId,
+            {
+              around: around_hit_only ? parsed.chunk : null,
+              window: 3,
+              maxChars: max_chars ?? 8000,
+            },
           );
+          return {
+            ref,
+            title: document.title,
+            path: document.path ?? undefined,
+            chunkCount: document.chunkCount,
+            truncated: document.truncated,
+            text: document.chunks
+              .map(
+                (chunk) =>
+                  `${chunk.heading ? `[${chunk.heading}]\n` : ""}${chunk.content}`,
+              )
+              .join("\n\n"),
+          };
         },
       }),
     };
 
     const instructions = [
-      `You are a search assistant for the Meilisearch index "${meta.uid}" (${meta.stats.numberOfDocuments} documents).`,
-      `Documents have the primary key "${primaryKey}"${title ? `, title field "${title}"` : ""}${content ? `, content field "${content}"` : ""}.`,
+      "You are a research assistant answering questions from the user's knowledge bases.",
       "",
-      "Rules:",
-      "- Use search_documents before answering questions about the data. Search several times with different keywords when results are weak.",
-      "- For Chinese, Japanese or Korean queries prefer short key terms (2-4 characters each) over full sentences, and try synonyms.",
-      "- Answer only from retrieved documents. If nothing relevant is found, say so plainly.",
-      "- Cite sources inline with markdown links like [1](#doc-<id>), numbering distinct documents in order of first use.",
-      "- Reply in the same language as the user's latest message. Be concise.",
+      "Selected knowledge bases (id — name — size — structure):",
+      await catalog(kbIds),
+      "",
+      "Tools: search (several queries at once), browse (folders and files), read (full text or context around a hit).",
+      "",
+      BASE_RULES,
+      ...(deep ? ["", DEEP_RULES] : []),
     ].join("\n");
 
     const result = streamText({
@@ -182,7 +262,7 @@ export async function POST(request: Request) {
       instructions,
       messages: await convertToModelMessages(body.messages),
       tools,
-      stopWhen: isStepCount(6),
+      stopWhen: isStepCount(deep ? 20 : 8),
       onToolExecutionEnd({ toolCall, toolOutput }) {
         if (toolOutput.type === "tool-error") {
           console.error(`[chat] ${toolCall.toolName} failed`, toolOutput.error);
@@ -199,6 +279,7 @@ export async function POST(request: Request) {
             ? ({
                 provider: provider.name,
                 model: modelId,
+                deep,
               } satisfies ChatMetadata)
             : undefined,
       }),

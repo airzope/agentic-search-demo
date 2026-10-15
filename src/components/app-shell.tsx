@@ -28,9 +28,9 @@ import { cn } from "@/lib/utils";
 const NAV: { href: string; label: MessageKey; icon: LucideIcon }[] = [
   { href: "/", label: "nav.chat", icon: MessageSquareTextIcon },
   { href: "/search", label: "nav.search", icon: SearchIcon },
+  { href: "/kb", label: "nav.indexes", icon: DatabaseIcon },
   { href: "/tokenization", label: "nav.tokenization", icon: ScissorsIcon },
   { href: "/embedders", label: "nav.embedders", icon: SparklesIcon },
-  { href: "/indexes", label: "nav.indexes", icon: DatabaseIcon },
   { href: "/settings", label: "nav.settings", icon: SettingsIcon },
 ];
 
@@ -58,21 +58,39 @@ export function useTheme() {
 
 function IndexPicker({ className }: { className?: string }) {
   const { t } = useI18n();
-  const { indexes, indexUid, setIndexUid } = useWorkspace();
+  const { kbs, kbId, setKbId, connections } = useWorkspace();
+  const groups = connections
+    .map((connection) => ({
+      connection,
+      items: (kbs ?? []).filter((kb) => kb.connectionId === connection.id),
+    }))
+    .filter((group) => group.items.length);
+  const label = (kb: NonNullable<typeof kbs>[number]) =>
+    `${kb.name} · ${kb.chunked ? t("kb.chunks", { count: kb.documents }) : t("index.docs", { count: kb.documents })}`;
   return (
     <NativeSelect
       aria-label={t("index.current")}
       className={className}
-      value={indexUid ?? ""}
-      disabled={!indexes?.length}
-      onChange={(event) => setIndexUid(event.target.value)}
+      value={kbId ?? ""}
+      disabled={!kbs?.length}
+      onChange={(event) => setKbId(event.target.value)}
     >
-      {!indexes?.length ? <option value="">{t("index.none")}</option> : null}
-      {indexes?.map((index) => (
-        <option key={index.uid} value={index.uid}>
-          {index.uid} · {t("index.docs", { count: index.numberOfDocuments })}
-        </option>
-      ))}
+      {!kbs?.length ? <option value="">{t("index.none")}</option> : null}
+      {groups.length > 1
+        ? groups.map((group) => (
+            <optgroup key={group.connection.id} label={group.connection.name}>
+              {group.items.map((kb) => (
+                <option key={kb.id} value={kb.id}>
+                  {label(kb)}
+                </option>
+              ))}
+            </optgroup>
+          ))
+        : kbs?.map((kb) => (
+            <option key={kb.id} value={kb.id}>
+              {label(kb)}
+            </option>
+          ))}
     </NativeSelect>
   );
 }

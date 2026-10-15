@@ -9,10 +9,11 @@ import {
   Trash2Icon,
 } from "lucide-react";
 import type { Embedder } from "meilisearch";
+import Link from "next/link";
 import { useRouter } from "next/navigation";
 import { useEffect, useState } from "react";
 
-import { useI18n, useWorkspace } from "@/components/app-providers";
+import { kbPath, useI18n, useWorkspace } from "@/components/app-providers";
 import { EmptyState, Page, RequireIndex, Section } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
@@ -31,6 +32,7 @@ import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toaster";
 import { api, errorMessage, jsonBody, waitForTask } from "@/lib/client";
 import type { DisplayFields } from "@/lib/display";
+import { QWEN3_EMBEDDER } from "@/lib/kb/schema";
 
 type Source = "openAi" | "ollama" | "rest" | "huggingFace";
 
@@ -434,7 +436,7 @@ function EmbedderDialog({
 function EmbeddersBody() {
   const { t } = useI18n();
   const router = useRouter();
-  const { indexUid, detail, refreshDetail, setPrefs } = useWorkspace();
+  const { kbId, detail, refreshDetail, setPrefs } = useWorkspace();
   const [dialog, setDialog] = useState<{ form: Form; editing: boolean } | null>(
     null,
   );
@@ -454,7 +456,7 @@ function EmbeddersBody() {
 
   const patch = async (embedders: Record<string, Embedder>) => {
     const { taskUid } = await api<{ taskUid: number }>(
-      `/api/indexes/${encodeURIComponent(indexUid ?? "")}/settings`,
+      `${kbPath(kbId ?? "")}/settings`,
       { method: "PATCH", body: jsonBody({ embedders }) },
     );
     return taskUid;
@@ -462,7 +464,7 @@ function EmbeddersBody() {
 
   const track = (taskUid: number, label: string) => {
     void refreshDetail();
-    waitForTask(taskUid)
+    waitForTask(taskUid, kbId)
       .then(() => toast.add({ title: t("task.succeeded"), description: label }))
       .catch((error) =>
         toast.add({
@@ -544,6 +546,47 @@ function EmbeddersBody() {
 
       {embedders.map(([name, embedder]) => {
         const value = embedder as Record<string, unknown>;
+        if (name === QWEN3_EMBEDDER && embedder.source === "userProvided") {
+          return (
+            <Section
+              key={name}
+              title={
+                <span className="flex items-center gap-2">
+                  <span className="font-mono">{name}</span>
+                  <Badge variant="success">Qwen3-Embedding</Badge>
+                </span>
+              }
+              description={t("emb.managed", {
+                dims: String(value.dimensions ?? ""),
+              })}
+              actions={
+                <>
+                  <Button
+                    variant="outline"
+                    size="sm"
+                    onClick={() => {
+                      setPrefs({ mode: "hybrid" });
+                      router.push("/search");
+                    }}
+                  >
+                    <SearchIcon />
+                    {t("emb.useInSearch")}
+                  </Button>
+                  <Button
+                    variant="ghost"
+                    size="sm"
+                    nativeButton={false}
+                    render={<Link href="/settings" />}
+                  >
+                    {t("emb.engineTitle")}
+                  </Button>
+                </>
+              }
+            >
+              {null}
+            </Section>
+          );
+        }
         return (
           <Section
             key={name}

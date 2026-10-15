@@ -1,11 +1,13 @@
-import { assertIndexUid, getMeili, handle } from "@/lib/meili";
-import { buildSearchParams } from "@/lib/search";
-import type { SearchPrefs, SearchResult } from "@/lib/types";
+import { retrieve } from "@/lib/kb/retrieve";
+import { badRequest, handle, parseKbId } from "@/lib/meili";
+import type { SearchPrefs } from "@/lib/types";
 
 type SearchBody = Partial<SearchPrefs> & {
-  indexUid?: string;
+  /** Knowledge base ids (`connection:index`); several means federated search. */
+  kbs?: string[];
   q?: string;
-  filter?: string | string[];
+  branch?: string | null;
+  filter?: string | (string | string[])[];
   facets?: string[];
   limit?: number;
   offset?: number;
@@ -14,25 +16,18 @@ type SearchBody = Partial<SearchPrefs> & {
 export async function POST(request: Request) {
   return handle(async () => {
     const body = (await request.json()) as SearchBody;
-    const index = (await getMeili()).index(assertIndexUid(body.indexUid));
-    const response = await index.search(
-      body.q ?? "",
-      buildSearchParams(body, {
-        filter: body.filter?.length ? body.filter : undefined,
-        facets: body.facets?.length ? body.facets : undefined,
-        limit: Math.min(Math.max(Number(body.limit ?? 20) || 20, 1), 100),
-        offset: Math.max(Number(body.offset ?? 0) || 0, 0),
-      }),
-    );
-    const result: SearchResult = {
-      hits: response.hits,
-      query: response.query,
-      processingTimeMs: response.processingTimeMs,
-      estimatedTotalHits: response.estimatedTotalHits,
-      semanticHitCount: (response as { semanticHitCount?: number })
-        .semanticHitCount,
-      facetDistribution: response.facetDistribution,
-    };
+    const kbIds = (body.kbs ?? []).map((id) => parseKbId(id).id);
+    if (!kbIds.length) return badRequest("Select at least one knowledge base");
+    const result = await retrieve({
+      kbIds,
+      q: body.q ?? "",
+      prefs: body,
+      branch: body.branch,
+      filter: body.filter,
+      facets: body.facets,
+      limit: body.limit,
+      offset: body.offset,
+    });
     return Response.json(result);
   });
 }

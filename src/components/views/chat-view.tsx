@@ -5,10 +5,12 @@ import { MarkdownClient } from "@comark/react";
 import breaks from "@comark/react/plugins/breaks";
 import { DefaultChatTransport, type UIMessage } from "ai";
 import {
+  BookOpenIcon,
   BotIcon,
+  BrainCircuitIcon,
   ChevronDownIcon,
   CircleAlertIcon,
-  FileTextIcon,
+  FolderTreeIcon,
   SearchIcon,
   SendIcon,
   SlidersHorizontalIcon,
@@ -29,6 +31,8 @@ import {
 } from "react";
 
 import { useI18n, useWorkspace } from "@/components/app-providers";
+import { DocViewer, type DocTarget } from "@/components/doc-viewer";
+import { KbScopePicker } from "@/components/kb-scope";
 import { EmptyState, RequireIndex } from "@/components/page";
 import { SearchControls } from "@/components/search-controls";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
@@ -60,7 +64,7 @@ import { guessLang, isComposing } from "@/lib/cjk";
 import { api, readStorage, writeStorage } from "@/lib/client";
 import type { PublicSettings } from "@/lib/providers";
 import { getSampleByIndex } from "@/lib/samples";
-import type { ChatHit, ChatMetadata } from "@/lib/types";
+import type { ChatMetadata } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 type ChatMessage = UIMessage<ChatMetadata>;
@@ -78,6 +82,29 @@ const isToolPart = (part: { type: string }): part is ToolPart =>
   part.type.startsWith("tool-");
 
 const PROVIDER_KEY = "cjk-studio.provider";
+const DEEP_KEY = "cjk-studio.deep";
+
+/** A source the assistant saw: from search, browse or read results. */
+type Source = {
+  ref: string;
+  kb?: string;
+  title?: string;
+  path?: string;
+  heading?: string;
+  snippet?: string;
+};
+
+/** `kbId~docId~chunk` → viewer target. */
+function targetOf(ref: string, title?: string): DocTarget | null {
+  const [kbId, docId, chunk] = ref.split("~");
+  if (!kbId || !docId) return null;
+  return {
+    kbId,
+    docId,
+    chunk: chunk !== undefined && /^\d+$/.test(chunk) ? Number(chunk) : null,
+    title,
+  };
+}
 
 const transport = new DefaultChatTransport<ChatMessage>({ api: "/api/chat" });
 
@@ -100,13 +127,19 @@ const markdownClassName = cn(
   "[&_th]:bg-muted/50 [&_th]:border [&_th]:px-2 [&_th]:py-1.5 [&_th]:font-medium [&_td]:border [&_td]:px-2 [&_td]:py-1.5",
 );
 
-/** Hits seen in this conversation, for citation popovers. */
-const CitationContext = createContext<Map<string, ChatHit>>(new Map());
+/** Sources seen in this conversation (for citation popovers) and the document opener. */
+const CitationContext = createContext<{
+  sources: Map<string, Source>;
+  open: (target: DocTarget) => void;
+}>({ sources: new Map(), open: () => undefined });
 
 function Citation({ id, children }: { id: string; children: ReactNode }) {
   const { t } = useI18n();
-  const hits = useContext(CitationContext);
-  const hit = hits.get(id);
+  const { sources, open } = useContext(CitationContext);
+  // Citations may point at a chunk the model only saw via `read` (no chunk suffix).
+  const source =
+    sources.get(id) ?? sources.get(id.split("~").slice(0, 2).join("~"));
+  const target = targetOf(id, source?.title);
   return (
     <Popover>
       <PopoverTrigger
@@ -116,24 +149,40 @@ function Citation({ id, children }: { id: string; children: ReactNode }) {
         {children}
       </PopoverTrigger>
       <PopoverContent className="w-80">
-        {hit ? (
+        {source ? (
           <div
             className="flex flex-col gap-1.5"
-            lang={guessLang(hit.title + hit.snippet)}
+            lang={guessLang(`${source.title ?? ""}${source.snippet ?? ""}`)}
           >
-            <p className="text-muted-foreground font-mono text-[11px]">
-              #{hit.id}
+            <p className="text-muted-foreground truncate text-[11px]">
+              {[source.kb, source.path].filter(Boolean).join(" · ")}
             </p>
-            <p className="font-medium">{hit.title || `#${hit.id}`}</p>
-            <p className="text-muted-foreground line-clamp-6 text-xs leading-relaxed">
-              {hit.snippet}
-            </p>
+            <p className="font-medium">{source.title || source.path || id}</p>
+            {source.heading ? (
+              <p className="text-muted-foreground text-xs">{source.heading}</p>
+            ) : null}
+            {source.snippet ? (
+              <p className="text-muted-foreground line-clamp-6 text-xs leading-relaxed">
+                {source.snippet}
+              </p>
+            ) : null}
           </div>
         ) : (
-          <p className="text-muted-foreground text-xs">
-            #{id} · {t("chat.sourceMissing")}
+          <p className="text-muted-foreground text-xs break-all">
+            {id} · {t("chat.sourceMissing")}
           </p>
         )}
+        {target ? (
+          <Button
+            size="xs"
+            variant="outline"
+            className="mt-2"
+            onClick={() => open(target)}
+          >
+            <BookOpenIcon />
+            {t("chat.openSource")}
+          </Button>
+        ) : null}
       </PopoverContent>
     </Popover>
   );
@@ -180,14 +229,69 @@ const markdownComponents = {
 
 /* --------------------------------------------------------------- tools */
 
-function hitsOf(output: unknown): ChatHit[] {
-  const hits = (output as { hits?: unknown } | null)?.hits;
-  return Array.isArray(hits) ? (hits as ChatHit[]) : [];
+type SearchOutput = {
+  results?: {
+    query: string;
+    total?: number;
+    hits: (Source & { duplicate?: boolean })[];
+    warnings?: string[];
+    errors?: { scope: string; message: string }[];
+  }[];
+};
+type BrowseOutput = {
+  branch?: string;
+  folders?: { branch: string; files: number }[];
+  files?: { ref: string; title: string; path: string }[];
+};
+type ReadOutput = {
+  ref?: string;
+  title?: string;
+  path?: string;
+  text?: string;
+};
+
+/** Every source in a tool result, keyed by ref. */
+function sourcesOf(part: ToolPart): Source[] {
+  if (part.state !== "output-available" || !part.output) return [];
+  if (part.type === "tool-search") {
+    return ((part.output as SearchOutput).results ?? []).flatMap((result) =>
+      result.hits.filter((hit) => !hit.duplicate),
+    );
+  }
+  if (part.type === "tool-browse") {
+    return ((part.output as BrowseOutput).files ?? []).map((file) => ({
+      ref: file.ref,
+      title: file.title,
+      path: file.path,
+    }));
+  }
+  if (part.type === "tool-read") {
+    const output = part.output as ReadOutput;
+    return output.ref
+      ? [
+          {
+            ref: output.ref,
+            title: output.title,
+            path: output.path,
+            snippet: output.text?.slice(0, 400),
+          },
+        ]
+      : [];
+  }
+  return [];
 }
 
+const joinQueries = (queries: unknown, lang: string) =>
+  Array.isArray(queries)
+    ? queries
+        .map((query) => (lang === "zh" ? `「${query}」` : `“${query}”`))
+        .join(" ")
+    : "";
+
 function ToolPartView({ part }: { part: ToolPart }) {
-  const { t } = useI18n();
-  const input = (part.input ?? {}) as { query?: string; id?: string };
+  const { t, lang } = useI18n();
+  const { open } = useContext(CitationContext);
+  const done = part.state === "output-available";
 
   if (part.state === "output-error") {
     return (
@@ -200,68 +304,123 @@ function ToolPartView({ part }: { part: ToolPart }) {
     );
   }
 
-  if (part.type === "tool-get_document") {
-    const done = part.state === "output-available";
+  if (part.type === "tool-browse") {
+    const input = (part.input ?? {}) as { branch?: string };
+    const output = (part.output ?? {}) as BrowseOutput;
+    const branch = input.branch || "/";
     return (
       <Marker role="status">
         <MarkerIcon>
-          <FileTextIcon />
+          <FolderTreeIcon />
         </MarkerIcon>
         <MarkerContent className={done ? undefined : "shimmer"}>
-          {t(done ? "chat.fetched" : "chat.fetching", { id: input.id ?? "" })}
+          {done
+            ? t("chat.browsed", {
+                branch,
+                folders: output.folders?.length ?? 0,
+                files: output.files?.length ?? 0,
+              })
+            : t("chat.browsing", { branch })}
         </MarkerContent>
       </Marker>
     );
   }
 
-  if (part.state !== "output-available") {
+  if (part.type === "tool-read") {
+    const input = (part.input ?? {}) as { ref?: string };
+    const output = (part.output ?? {}) as ReadOutput;
+    const target = input.ref ? targetOf(input.ref, output.title) : null;
+    return (
+      <Marker role="status">
+        <MarkerIcon>
+          <BookOpenIcon />
+        </MarkerIcon>
+        <MarkerContent className={done ? undefined : "shimmer"}>
+          {done && target ? (
+            <button
+              type="button"
+              className="hover:text-foreground text-left underline-offset-3 hover:underline"
+              onClick={() => open(target)}
+            >
+              {t("chat.read", {
+                title: output.title || output.path || input.ref || "",
+              })}
+            </button>
+          ) : (
+            t("chat.reading")
+          )}
+        </MarkerContent>
+      </Marker>
+    );
+  }
+
+  // search
+  const input = (part.input ?? {}) as { queries?: string[] };
+  const queries = joinQueries(input.queries, lang);
+  if (!done) {
     return (
       <Marker role="status">
         <MarkerIcon>
           <SearchIcon />
         </MarkerIcon>
         <MarkerContent className="shimmer">
-          {t("chat.searching", { query: input.query ?? "" })}
+          {t("chat.searchingMulti", { queries })}
         </MarkerContent>
       </Marker>
     );
   }
-
-  const hits = hitsOf(part.output);
+  const results = (part.output as SearchOutput).results ?? [];
+  const sources = sourcesOf(part);
+  const notices = results.flatMap((result) => [
+    ...(result.warnings ?? []),
+    ...(result.errors ?? []).map((item) => `${item.scope}: ${item.message}`),
+  ]);
   return (
     <Collapsible className="group w-full">
       <CollapsibleTrigger className="text-muted-foreground hover:text-foreground flex w-full items-center gap-2 text-left text-sm">
         <SearchIcon className="size-4 shrink-0" />
         <span className="min-w-0 flex-1 truncate">
-          {t("chat.searched", { query: input.query ?? "", count: hits.length })}
+          {t("chat.searchedMulti", { queries, count: sources.length })}
         </span>
-        {hits.length ? (
-          <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-open:rotate-180" />
-        ) : null}
+        <ChevronDownIcon className="size-4 shrink-0 transition-transform group-data-open:rotate-180" />
       </CollapsibleTrigger>
-      {hits.length ? (
-        <CollapsibleContent>
-          <ol className="bg-muted/40 mt-2 flex flex-col gap-2 rounded-lg p-3 text-xs">
-            {hits.map((hit) => (
+      <CollapsibleContent>
+        <ol className="bg-muted/40 mt-2 flex flex-col gap-2 rounded-lg p-3 text-xs">
+          {[...new Set(notices)].map((notice) => (
+            <li key={notice} className="text-amber-700 dark:text-amber-400">
+              {notice}
+            </li>
+          ))}
+          {sources.map((source) => {
+            const target = targetOf(source.ref, source.title);
+            return (
               <li
-                key={hit.id}
+                key={source.ref}
                 className="flex flex-col gap-0.5"
-                lang={guessLang(hit.title + hit.snippet)}
+                lang={guessLang(`${source.title ?? ""}${source.snippet ?? ""}`)}
               >
-                <span className="font-medium">
-                  <span className="text-muted-foreground mr-1.5 font-mono">
-                    #{hit.id}
+                <button
+                  type="button"
+                  className="text-left font-medium underline-offset-3 hover:underline"
+                  onClick={() => target && open(target)}
+                >
+                  {source.title || source.path || source.ref}
+                </button>
+                <span className="text-muted-foreground truncate">
+                  {[source.kb, source.path, source.heading]
+                    .filter(Boolean)
+                    .join(" · ")}
+                </span>
+                {source.snippet ? (
+                  <span className="text-muted-foreground line-clamp-2">
+                    {source.snippet}
                   </span>
-                  {hit.title}
-                </span>
-                <span className="text-muted-foreground line-clamp-2">
-                  {hit.snippet}
-                </span>
+                ) : null}
               </li>
-            ))}
-          </ol>
-        </CollapsibleContent>
-      ) : null}
+            );
+          })}
+        </ol>
+      </CollapsibleContent>
     </Collapsible>
   );
 }
@@ -278,18 +437,22 @@ function errorText(error: unknown) {
 
 function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
   const { t } = useI18n();
-  const { indexUid, prefs } = useWorkspace();
+  const { kbs, scope, prefs } = useWorkspace();
   const configured = providers.providers.filter(
     (provider) => provider.configured,
   );
   const [providerId, setProviderId] = useState<string | null>(null);
+  const [deep, setDeep] = useState(false);
   const [input, setInput] = useState("");
+  const [opened, setOpened] = useState<DocTarget | null>(null);
 
   useEffect(() => {
-    const saved = readStorage<string | null>(PROVIDER_KEY, null);
     // eslint-disable-next-line react-hooks/set-state-in-effect -- restore from localStorage
-    setProviderId(saved);
+    setProviderId(readStorage<string | null>(PROVIDER_KEY, null));
+    setDeep(readStorage<boolean>(DEEP_KEY, false));
   }, []);
+
+  const scopeKbs = (kbs ?? []).filter((kb) => scope.includes(kb.id));
 
   const activeProvider =
     configured.find((provider) => provider.id === providerId) ??
@@ -297,21 +460,22 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
     configured[0];
 
   const { messages, sendMessage, status, error, stop, setMessages } =
-    useChat<ChatMessage>({ id: `chat-${indexUid}`, transport });
+    useChat<ChatMessage>({ id: "chat", transport });
 
   const busy = status === "submitted" || status === "streaming";
 
   const citations = useMemo(() => {
-    const map = new Map<string, ChatHit>();
+    const sources = new Map<string, Source>();
     for (const message of messages) {
       for (const part of message.parts) {
-        if (isToolPart(part) && part.state === "output-available") {
-          for (const hit of hitsOf(part.output)) map.set(String(hit.id), hit);
+        if (!isToolPart(part)) continue;
+        for (const source of sourcesOf(part)) {
+          sources.set(source.ref, { ...sources.get(source.ref), ...source });
         }
       }
     }
-    return map;
-  }, [messages]);
+    return { sources, open: setOpened };
+  }, [messages, setOpened]);
 
   const last = messages[messages.length - 1];
   const showThinking =
@@ -327,15 +491,16 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
   const send = (text: string) => {
     const value = text.trim();
     if (!value || busy || !activeProvider) return;
-    // Settings travel with each request, so switching model/index applies immediately.
+    // Settings travel with each request, so switching model/scope applies immediately.
     void sendMessage(
       { text: value },
       {
         body: {
-          indexUid,
+          kbs: scope,
           provider: activeProvider.id,
           model: activeProvider.model,
           search: prefs,
+          deep,
         },
       },
     );
@@ -347,7 +512,14 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
     send(input);
   };
 
-  const sample = indexUid ? getSampleByIndex(indexUid) : undefined;
+  const sample = scopeKbs
+    .filter((kb) => kb.connectionId === "local")
+    .map((kb) => getSampleByIndex(kb.indexUid))
+    .find(Boolean);
+  const scopeLabel =
+    scopeKbs.length === 1
+      ? scopeKbs[0].name
+      : t("scope.count", { count: scopeKbs.length });
 
   if (!activeProvider) {
     return (
@@ -370,6 +542,7 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
     <CitationContext.Provider value={citations}>
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-wrap items-center gap-2 px-4 pt-3">
+          <KbScopePicker />
           <NativeSelect
             aria-label={t("chat.model")}
             className="min-w-0 flex-1 sm:w-56 sm:flex-none"
@@ -401,6 +574,18 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
             </PopoverContent>
           </Popover>
           <Button
+            variant={deep ? "default" : "outline"}
+            aria-pressed={deep}
+            title={t("chat.deep.hint")}
+            onClick={() => {
+              setDeep(!deep);
+              writeStorage(DEEP_KEY, !deep);
+            }}
+          >
+            <BrainCircuitIcon />
+            {t("chat.deep")}
+          </Button>
+          <Button
             variant="ghost"
             className="ml-auto"
             aria-label={t("chat.new")}
@@ -420,7 +605,7 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
                   <div className="flex flex-1 flex-col items-center justify-center gap-5 py-10 text-center">
                     <div className="flex flex-col gap-1.5">
                       <h1 className="text-2xl font-semibold tracking-tight text-balance">
-                        {t("chat.empty.title", { index: indexUid ?? "" })}
+                        {t("chat.empty.title", { index: scopeLabel })}
                       </h1>
                       <p className="text-muted-foreground text-sm">
                         {t("chat.empty.desc")}
@@ -503,6 +688,9 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
                                 <p className="text-muted-foreground/70 text-[11px]">
                                   {message.metadata.provider} ·{" "}
                                   {message.metadata.model}
+                                  {message.metadata.deep
+                                    ? ` · ${t("chat.deep")}`
+                                    : null}
                                 </p>
                               ) : null}
                             </>
@@ -587,6 +775,7 @@ function ChatBody({ providers }: { providers: PublicSettings["llm"] }) {
           </form>
         </div>
       </div>
+      <DocViewer target={opened} onClose={() => setOpened(null)} />
     </CitationContext.Provider>
   );
 }
@@ -618,8 +807,8 @@ export function ChatView() {
 
 /** Chat owns its own scrolling, so the empty states get a padded frame. */
 function RequireIndexFrame({ children }: { children: ReactNode }) {
-  const { status, indexUid } = useWorkspace();
-  if ((status && !status.meilisearch.ok) || !indexUid) {
+  const { status, kbId } = useWorkspace();
+  if ((status && !status.meilisearch.ok) || !kbId) {
     return (
       <div className="mx-auto w-full max-w-3xl p-4 md:p-6">
         <RequireIndex>{children}</RequireIndex>

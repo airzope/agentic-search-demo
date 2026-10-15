@@ -1,4 +1,5 @@
-import { badRequest, getMeili, handle, settle } from "@/lib/meili";
+import { invalidateKb } from "@/lib/kb/catalog";
+import { badRequest, getMeili, handle, kbIdOf, settle } from "@/lib/meili";
 import { getSampleDataset } from "@/lib/samples";
 
 /** Create (or refresh) a demo index with recommended CJK settings. */
@@ -17,7 +18,10 @@ export async function POST(request: Request) {
     }
     await settle(index.updateSettings(dataset.settings));
     await settle(index.addDocuments(dataset.documents, { primaryKey: "id" }));
+    const kbId = kbIdOf("local", dataset.indexUid);
+    invalidateKb(kbId);
     return Response.json({
+      kbId,
       uid: dataset.indexUid,
       documents: dataset.documents.length,
     });

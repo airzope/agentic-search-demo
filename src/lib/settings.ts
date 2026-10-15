@@ -4,9 +4,14 @@ import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import path from "node:path";
 
 import {
+  BUILTIN_EMBEDDING,
+  DEFAULT_QUERY_INSTRUCTION,
   PROVIDER_PRESETS,
   getPreset,
+  type EmbeddingEngine,
+  type ModelSource,
   type ProviderKind,
+  type PublicConnection,
   type PublicProvider,
   type PublicSettings,
   type SettingsPatch,
@@ -22,9 +27,27 @@ type StoredProvider = {
   model?: string;
 };
 
+type StoredConnection = {
+  id: string;
+  name: string;
+  host: string;
+  apiKey?: string;
+};
+
 type StoredSettings = {
   meilisearch?: { host?: string; apiKey?: string };
   llm?: { active?: string; providers?: Record<string, StoredProvider> };
+  connections?: StoredConnection[];
+  embedding?: {
+    engine?: EmbeddingEngine;
+    source?: ModelSource;
+    url?: string;
+    baseURL?: string;
+    apiKey?: string;
+    model?: string;
+    queryInstruction?: string;
+  };
+  ocr?: { url?: string; lang?: string };
 };
 
 export type ResolvedProvider = {
@@ -39,7 +62,7 @@ export type ResolvedProvider = {
 
 const DEFAULT_MEILISEARCH_HOST = "http://127.0.0.1:7700";
 
-const dataDir = () =>
+export const dataDir = () =>
   process.env.APP_DATA_DIR ?? path.join(process.cwd(), ".data");
 const settingsFile = () => path.join(dataDir(), "settings.json");
 
@@ -88,6 +111,81 @@ export async function getMeilisearchConfig() {
       : envKey
         ? ("env" as const)
         : null,
+  };
+}
+
+export const LOCAL_CONNECTION_ID = "local";
+export const CONNECTION_ID = /^[a-z0-9][a-z0-9_-]{0,31}$/;
+
+export type ConnectionConfig = {
+  id: string;
+  name: string;
+  host: string;
+  apiKey?: string;
+  builtin: boolean;
+};
+
+/** All Meilisearch instances: the local one first, then remote/cloud ones. */
+export async function getConnections(): Promise<ConnectionConfig[]> {
+  const stored = await readStored();
+  const local = await getMeilisearchConfig();
+  return [
+    {
+      id: LOCAL_CONNECTION_ID,
+      name: "Local",
+      host: local.host,
+      apiKey: local.apiKey,
+      builtin: true,
+    },
+    ...(stored.connections ?? []).map((connection) => ({
+      ...connection,
+      builtin: false,
+    })),
+  ];
+}
+
+export async function getEmbeddingConfig() {
+  const stored = (await readStored()).embedding ?? {};
+  const engine: EmbeddingEngine =
+    stored.engine ??
+    (env("EMBEDDING_ENGINE") === "remote" ? "remote" : "builtin");
+  const source: ModelSource =
+    stored.source ??
+    ((env("EMBEDDING_MODEL_SOURCE") as ModelSource | undefined) ||
+      (env("HF_ENDPOINT")?.includes("hf-mirror")
+        ? "hf-mirror"
+        : "huggingface"));
+  const customUrl = stored.url ?? env("EMBEDDING_MODEL_URL");
+  const url =
+    source === "custom" && customUrl
+      ? customUrl
+      : BUILTIN_EMBEDDING.urls[source === "custom" ? "huggingface" : source];
+  return {
+    engine,
+    source,
+    url,
+    customUrl,
+    file: BUILTIN_EMBEDDING.file,
+    remote: {
+      baseURL: (stored.baseURL ?? env("EMBEDDING_BASE_URL") ?? "").replace(
+        /\/+$/,
+        "",
+      ),
+      apiKey: stored.apiKey ?? env("EMBEDDING_API_KEY"),
+      model: stored.model ?? env("EMBEDDING_MODEL") ?? "",
+    },
+    queryInstruction:
+      stored.queryInstruction ??
+      env("EMBEDDING_QUERY_INSTRUCTION") ??
+      DEFAULT_QUERY_INSTRUCTION,
+  };
+}
+
+export async function getOcrConfig() {
+  const stored = (await readStored()).ocr ?? {};
+  return {
+    url: (stored.url ?? env("OCR_URL") ?? "").replace(/\/+$/, ""),
+    lang: stored.lang ?? env("OCR_LANG") ?? "ch",
   };
 }
 
@@ -169,7 +267,37 @@ export async function getPublicSettings(): Promise<PublicSettings> {
     };
   });
 
+  const embedding = await getEmbeddingConfig();
+  const connections = (await getConnections()).map(
+    (connection): PublicConnection => ({
+      id: connection.id,
+      name: connection.name,
+      host: connection.host,
+      hasKey: Boolean(connection.apiKey),
+      keyHint: keyHint(connection.apiKey),
+      builtin: connection.builtin,
+    }),
+  );
+
   return {
+    connections,
+    embedding: {
+      engine: embedding.engine,
+      builtin: {
+        model: BUILTIN_EMBEDDING.id,
+        file: embedding.file,
+        source: embedding.source,
+        url: embedding.url,
+      },
+      remote: {
+        baseURL: embedding.remote.baseURL,
+        model: embedding.remote.model,
+        hasKey: Boolean(embedding.remote.apiKey),
+        keyHint: keyHint(embedding.remote.apiKey),
+      },
+      queryInstruction: embedding.queryInstruction,
+    },
+    ocr: await getOcrConfig(),
     meilisearch: {
       host: meili.host,
       hostSource: meili.hostSource,
@@ -223,6 +351,47 @@ export async function updateSettings(patch: SettingsPatch) {
       applyField(entry, "baseURL", value.baseURL?.replace(/\/+$/, ""));
       applyField(entry, "model", value.model);
     }
+  }
+
+  if (patch.connections) {
+    const list = (stored.connections ??= []);
+    for (const id of patch.connections.remove ?? []) {
+      const at = list.findIndex((connection) => connection.id === id);
+      if (at >= 0) list.splice(at, 1);
+    }
+    for (const item of patch.connections.upsert ?? []) {
+      if (!CONNECTION_ID.test(item.id) || item.id === LOCAL_CONNECTION_ID) {
+        throw new Error(
+          `Invalid connection id "${item.id}": use lowercase letters, digits, - and _.`,
+        );
+      }
+      let entry = list.find((connection) => connection.id === item.id);
+      if (!entry) {
+        if (!item.host) throw new Error("Connection host is required");
+        entry = { id: item.id, name: item.name || item.id, host: item.host };
+        list.push(entry);
+      }
+      if (item.name) entry.name = item.name.trim();
+      if (item.host) entry.host = item.host.trim().replace(/\/+$/, "");
+      applyField(entry, "apiKey", item.apiKey);
+    }
+  }
+
+  if (patch.embedding) {
+    const embedding = (stored.embedding ??= {});
+    applyField(embedding, "engine", patch.embedding.engine);
+    applyField(embedding, "source", patch.embedding.source);
+    applyField(embedding, "url", patch.embedding.url);
+    applyField(embedding, "baseURL", patch.embedding.baseURL);
+    applyField(embedding, "apiKey", patch.embedding.apiKey);
+    applyField(embedding, "model", patch.embedding.model);
+    applyField(embedding, "queryInstruction", patch.embedding.queryInstruction);
+  }
+
+  if (patch.ocr) {
+    const ocr = (stored.ocr ??= {});
+    applyField(ocr, "url", patch.ocr.url?.replace(/\/+$/, ""));
+    applyField(ocr, "lang", patch.ocr.lang);
   }
 
   await writeStored(stored);

@@ -43,3 +43,6 @@ next-env.d.ts
 
 # app data (settings with API keys)
 /.data/
+
+# python
+__pycache__/

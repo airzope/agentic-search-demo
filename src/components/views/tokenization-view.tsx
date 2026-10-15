@@ -9,7 +9,7 @@ import {
 import type { LocalizedAttribute, Settings } from "meilisearch";
 import { useEffect, useMemo, useRef, useState } from "react";
 
-import { useI18n, useWorkspace } from "@/components/app-providers";
+import { kbPath, useI18n, useWorkspace } from "@/components/app-providers";
 import { Page, RequireIndex, Section } from "@/components/page";
 import { Button } from "@/components/ui/button";
 import { Label } from "@/components/ui/label";
@@ -257,7 +257,7 @@ function LineEditor({
 
 function TokenizationBody() {
   const { t } = useI18n();
-  const { indexUid, detail, refreshDetail } = useWorkspace();
+  const { kbId, currentKb, detail, refreshDetail } = useWorkspace();
   const saved = useMemo(
     () => (detail ? draftsFrom(detail.settings) : null),
     [detail],
@@ -302,14 +302,14 @@ function TokenizationBody() {
   );
 
   const save = async () => {
-    if (!indexUid || !changeCount) return;
+    if (!kbId || !changeCount) return;
     setSaving(true);
     try {
       const { taskUid } = await api<{ taskUid: number }>(
-        `/api/indexes/${encodeURIComponent(indexUid)}/settings`,
+        `${kbPath(kbId)}/settings`,
         { method: "PATCH", body: jsonBody(changes) },
       );
-      await waitForTask(taskUid);
+      await waitForTask(taskUid, kbId);
       toast.add({ title: t("common.saved"), description: t("tok.saveHint") });
       await refreshDetail();
     } catch (error) {
@@ -327,7 +327,10 @@ function TokenizationBody() {
     setDrafts((current) => (current ? { ...current, [key]: value } : current));
 
   /* ---- preview ---- */
-  const sample = indexUid ? getSampleByIndex(indexUid) : undefined;
+  const sample =
+    currentKb?.connectionId === "local"
+      ? getSampleByIndex(currentKb.indexUid)
+      : undefined;
   const [text, setText] = useState(sample?.previewText ?? DEFAULT_PREVIEW);
   const [locale, setLocale] = useState<string>("");
   const [preview, setPreview] = useState<{
@@ -369,6 +372,7 @@ function TokenizationBody() {
         method: "POST",
         signal: controller.signal,
         body: jsonBody({
+          kb: kbId,
           text,
           locale: effectiveLocale || null,
           dictionary: parsed.dictionary,
@@ -428,7 +432,7 @@ function TokenizationBody() {
   return (
     <div className="grid min-w-0 gap-5 lg:grid-cols-[minmax(0,1fr)_minmax(0,1fr)]">
       <Section
-        title={<span className="font-mono">{indexUid}</span>}
+        title={currentKb?.name ?? kbId}
         description={t("tok.saveHint")}
         actions={
           <>

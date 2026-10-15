@@ -3,12 +3,16 @@
 import {
   CheckIcon,
   CircleAlertIcon,
+  DownloadIcon,
   ExternalLinkIcon,
   ListIcon,
+  PencilIcon,
   PlugZapIcon,
+  PlusIcon,
   StarIcon,
+  Trash2Icon,
 } from "lucide-react";
-import { useEffect, useId, useMemo, useState } from "react";
+import { useCallback, useEffect, useId, useMemo, useState } from "react";
 
 import { useI18n, useWorkspace } from "@/components/app-providers";
 import { useTheme } from "@/components/app-shell";
@@ -17,14 +21,21 @@ import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Field } from "@/components/ui/label";
+import { NativeSelect } from "@/components/ui/native-select";
 import { Segmented } from "@/components/ui/segmented";
 import { Spinner } from "@/components/ui/spinner";
+import { Textarea } from "@/components/ui/textarea";
 import { toast } from "@/components/ui/toaster";
 import { api, errorMessage, jsonBody } from "@/lib/client";
-import type {
-  PublicProvider,
-  PublicSettings,
-  SettingsPatch,
+import {
+  BUILTIN_EMBEDDING,
+  DEFAULT_QUERY_INSTRUCTION,
+  REMOTE_EMBEDDING_PRESETS,
+  type EmbeddingEngine,
+  type ModelSource,
+  type PublicProvider,
+  type PublicSettings,
+  type SettingsPatch,
 } from "@/lib/providers";
 
 import type { Theme } from "@/lib/theme";
@@ -45,7 +56,7 @@ function MeilisearchSettings({
   onSaved: (settings: PublicSettings) => void;
 }) {
   const { t } = useI18n();
-  const { status, refreshStatus, refreshIndexes } = useWorkspace();
+  const { status, refreshStatus, refreshKbs } = useWorkspace();
   const [host, setHost] = useState(settings.host);
   const [apiKey, setApiKey] = useState("");
   const [saving, setSaving] = useState(false);
@@ -59,7 +70,7 @@ function MeilisearchSettings({
         }),
       );
       setApiKey("");
-      await Promise.all([refreshStatus(), refreshIndexes()]);
+      await Promise.all([refreshStatus(), refreshKbs()]);
       toast.add({ title: t("settings.saved") });
     } catch (error) {
       toast.add({
@@ -468,6 +479,656 @@ function LlmSettings({
   );
 }
 
+const notifyError = (title: string, error: unknown) =>
+  toast.add({ title, description: errorMessage(error), type: "error" });
+
+/* ----------------------------------------------------------- connections */
+
+const EMPTY_CONNECTION = { id: "", name: "", host: "", apiKey: "" };
+
+function ConnectionSettings({
+  settings,
+  onSaved,
+}: {
+  settings: PublicSettings["connections"];
+  onSaved: (settings: PublicSettings) => void;
+}) {
+  const { t } = useI18n();
+  const { connections: statuses, refreshKbs } = useWorkspace();
+  const [form, setForm] = useState(EMPTY_CONNECTION);
+  const [editing, setEditing] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const extra = settings.filter((connection) => !connection.builtin);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      onSaved(
+        await saveSettings({
+          connections: {
+            upsert: [
+              {
+                id: form.id.trim(),
+                name: form.name.trim() || undefined,
+                host: form.host.trim(),
+                apiKey: form.apiKey ? form.apiKey : undefined,
+              },
+            ],
+          },
+        }),
+      );
+      setForm(EMPTY_CONNECTION);
+      setEditing(false);
+      await refreshKbs();
+      toast.add({ title: t("settings.saved") });
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const remove = async (id: string, name: string) => {
+    if (!window.confirm(t("conn.removeConfirm", { name }))) return;
+    try {
+      onSaved(await saveSettings({ connections: { remove: [id] } }));
+      await refreshKbs();
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    }
+  };
+
+  return (
+    <Section title={t("conn.title")} description={t("conn.desc")}>
+      {extra.length ? (
+        <ul className="divide-y rounded-lg border">
+          {extra.map((connection) => {
+            const status = statuses.find((item) => item.id === connection.id);
+            return (
+              <li
+                key={connection.id}
+                className="flex flex-wrap items-center gap-x-3 gap-y-1 px-3 py-2.5"
+              >
+                <div className="flex min-w-0 flex-1 flex-col">
+                  <span className="truncate text-sm font-medium">
+                    {connection.name}
+                    <span className="text-muted-foreground ml-2 font-mono text-xs font-normal">
+                      {connection.id}
+                    </span>
+                  </span>
+                  <span className="text-muted-foreground truncate font-mono text-xs">
+                    {connection.host}
+                    {connection.keyHint ? ` · ${connection.keyHint}` : ""}
+                  </span>
+                </div>
+                {status ? (
+                  status.ok ? (
+                    <Badge variant="success">
+                      <CheckIcon />
+                      {t("conn.ok")}
+                    </Badge>
+                  ) : (
+                    <Badge variant="destructive" title={status.error}>
+                      <CircleAlertIcon />
+                      {t("conn.down")}
+                    </Badge>
+                  )
+                ) : null}
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`${t("common.edit")} ${connection.name}`}
+                  onClick={() => {
+                    setForm({
+                      id: connection.id,
+                      name: connection.name,
+                      host: connection.host,
+                      apiKey: "",
+                    });
+                    setEditing(true);
+                  }}
+                >
+                  <PencilIcon />
+                </Button>
+                <Button
+                  variant="ghost"
+                  size="icon-xs"
+                  aria-label={`${t("conn.remove")} ${connection.name}`}
+                  onClick={() => void remove(connection.id, connection.name)}
+                >
+                  <Trash2Icon />
+                </Button>
+              </li>
+            );
+          })}
+        </ul>
+      ) : null}
+      <form
+        className="grid items-end gap-3 sm:grid-cols-[8rem_1fr_1.4fr_1fr_auto]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <Field label={t("conn.id")}>
+          <Input
+            value={form.id}
+            required
+            readOnly={editing}
+            pattern="[a-z0-9][a-z0-9_\-]*"
+            placeholder="cloud"
+            className="font-mono text-xs md:text-xs"
+            onChange={(event) => setForm({ ...form, id: event.target.value })}
+          />
+        </Field>
+        <Field label={t("conn.name")}>
+          <Input
+            value={form.name}
+            placeholder="Meilisearch Cloud"
+            onChange={(event) => setForm({ ...form, name: event.target.value })}
+          />
+        </Field>
+        <Field label={t("conn.host")}>
+          <Input
+            value={form.host}
+            required={!editing}
+            placeholder="https://ms-xxxx.meilisearch.io"
+            onChange={(event) => setForm({ ...form, host: event.target.value })}
+          />
+        </Field>
+        <Field label={t("settings.apiKey")}>
+          <Input
+            type="password"
+            autoComplete="off"
+            value={form.apiKey}
+            placeholder={editing ? t("settings.keepKey") : t("common.optional")}
+            onChange={(event) =>
+              setForm({ ...form, apiKey: event.target.value })
+            }
+          />
+        </Field>
+        <div className="flex gap-2">
+          <Button type="submit" disabled={saving || !form.id.trim()}>
+            {saving ? <Spinner /> : editing ? null : <PlusIcon />}
+            {editing ? t("common.save") : t("conn.add")}
+          </Button>
+          {editing ? (
+            <Button
+              type="button"
+              variant="ghost"
+              onClick={() => {
+                setForm(EMPTY_CONNECTION);
+                setEditing(false);
+              }}
+            >
+              {t("common.cancel")}
+            </Button>
+          ) : null}
+        </div>
+      </form>
+      <p className="text-muted-foreground text-xs">{t("conn.hint")}</p>
+    </Section>
+  );
+}
+
+/* -------------------------------------------------------------- embedding */
+
+type BuiltinStatus = {
+  state:
+    "missing" | "downloading" | "downloaded" | "loading" | "ready" | "error";
+  file: string;
+  path: string;
+  url: string;
+  downloadedBytes: number;
+  totalBytes: number | null;
+  gpu: string | false | null;
+  error: string | null;
+};
+
+type EmbeddingStatus = {
+  engine: EmbeddingEngine;
+  model: string;
+  builtin: BuiltinStatus;
+};
+
+const MODEL_SOURCES: { value: ModelSource; label: string }[] = [
+  { value: "huggingface", label: "Hugging Face" },
+  { value: "hf-mirror", label: "hf-mirror.com" },
+  { value: "modelscope", label: "ModelScope 魔搭" },
+  { value: "custom", label: "Custom" },
+];
+
+function BuiltinState({ status }: { status: BuiltinStatus }) {
+  const { t } = useI18n();
+  const pct =
+    status.totalBytes && status.state === "downloading"
+      ? `${Math.floor((status.downloadedBytes / status.totalBytes) * 100)}%`
+      : `${(status.downloadedBytes / 1024 ** 2).toFixed(0)} MB`;
+  const label =
+    status.state === "downloading"
+      ? t("emb.state.downloading", { pct })
+      : status.state === "error"
+        ? t("emb.state.error", { error: status.error ?? "" })
+        : t(`emb.state.${status.state}`);
+  const variant =
+    status.state === "ready"
+      ? "success"
+      : status.state === "error"
+        ? "destructive"
+        : status.state === "missing"
+          ? "outline"
+          : "warning";
+  return (
+    <Badge variant={variant} className="max-w-full whitespace-normal">
+      {status.state === "downloading" || status.state === "loading" ? (
+        <Spinner className="size-3" />
+      ) : null}
+      {label}
+      {status.state === "ready"
+        ? ` · ${status.gpu ? status.gpu : "CPU"}`
+        : null}
+    </Badge>
+  );
+}
+
+function EmbeddingSettings({
+  settings,
+  onSaved,
+}: {
+  settings: PublicSettings["embedding"];
+  onSaved: (settings: PublicSettings) => void;
+}) {
+  const { t } = useI18n();
+  const [engine, setEngine] = useState<EmbeddingEngine>(settings.engine);
+  const [source, setSource] = useState<ModelSource>(settings.builtin.source);
+  const [url, setUrl] = useState(
+    settings.builtin.source === "custom" ? settings.builtin.url : "",
+  );
+  const [baseURL, setBaseURL] = useState(settings.remote.baseURL);
+  const [model, setModel] = useState(settings.remote.model);
+  const [apiKey, setApiKey] = useState("");
+  const [instruction, setInstruction] = useState(settings.queryInstruction);
+  const [status, setStatus] = useState<EmbeddingStatus | null>(null);
+  const [saving, setSaving] = useState(false);
+  const [testing, setTesting] = useState(false);
+  const [testResult, setTestResult] = useState<string | null>(null);
+
+  const load = useCallback(async () => {
+    try {
+      setStatus(await api<EmbeddingStatus>("/api/embedding"));
+    } catch {
+      setStatus(null);
+    }
+  }, []);
+
+  useEffect(() => {
+    // Async loader: state is only set after the request resolves.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void load();
+  }, [load]);
+
+  const busy =
+    status?.builtin.state === "downloading" ||
+    status?.builtin.state === "loading";
+  useEffect(() => {
+    if (!busy) return;
+    const timer = setInterval(() => void load(), 1500);
+    return () => clearInterval(timer);
+  }, [busy, load]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      onSaved(
+        await saveSettings({
+          embedding: {
+            engine,
+            source,
+            url: source === "custom" ? url.trim() : null,
+            baseURL: baseURL.trim() || null,
+            model: model.trim() || null,
+            apiKey: apiKey ? apiKey : undefined,
+            queryInstruction: instruction,
+          },
+        }),
+      );
+      setApiKey("");
+      await load();
+      toast.add({ title: t("settings.saved") });
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const action = async (name: "download" | "load") => {
+    try {
+      await api("/api/embedding", {
+        method: "POST",
+        body: jsonBody({ action: name }),
+      });
+      await load();
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    }
+  };
+
+  const test = async () => {
+    setTesting(true);
+    setTestResult(null);
+    try {
+      const result = await api<{
+        dimensions: number;
+        latencyMs: number;
+        similarity: number;
+      }>("/api/embedding", {
+        method: "POST",
+        body: jsonBody({ action: "test" }),
+      });
+      setTestResult(
+        t("emb.testOk", {
+          dims: result.dimensions,
+          ms: result.latencyMs,
+          sim: result.similarity,
+        }),
+      );
+      await load();
+    } catch (error) {
+      setTestResult(errorMessage(error));
+    } finally {
+      setTesting(false);
+    }
+  };
+
+  const builtin = status?.builtin;
+
+  return (
+    <Section
+      title={t("emb.engineTitle")}
+      description={t("emb.engine.desc")}
+      actions={
+        status ? (
+          <span className="text-muted-foreground font-mono text-xs">
+            {status.model}
+          </span>
+        ) : null
+      }
+    >
+      <Segmented<EmbeddingEngine>
+        value={engine}
+        onChange={setEngine}
+        options={[
+          { value: "builtin", label: t("emb.engine.builtin") },
+          { value: "remote", label: t("emb.engine.remote") },
+        ]}
+        className="flex-wrap"
+      />
+
+      {engine === "builtin" ? (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap items-center gap-2">
+            {builtin ? <BuiltinState status={builtin} /> : <Spinner />}
+            {builtin &&
+            (builtin.state === "missing" || builtin.state === "error") ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void action("download")}
+              >
+                <DownloadIcon />
+                {t("emb.download")}
+              </Button>
+            ) : null}
+            {builtin?.state === "downloaded" ? (
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => void action("load")}
+              >
+                {t("emb.load")}
+              </Button>
+            ) : null}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-[12rem_1fr]">
+            <Field label={t("emb.modelSource")}>
+              <NativeSelect
+                value={source}
+                onChange={(event) =>
+                  setSource(event.target.value as ModelSource)
+                }
+              >
+                {MODEL_SOURCES.map((item) => (
+                  <option key={item.value} value={item.value}>
+                    {item.value === "custom"
+                      ? t("emb.source.custom")
+                      : item.label}
+                  </option>
+                ))}
+              </NativeSelect>
+            </Field>
+            {source === "custom" ? (
+              <Field label="URL">
+                <Input
+                  value={url}
+                  placeholder={`https://…/${BUILTIN_EMBEDDING.file}`}
+                  onChange={(event) => setUrl(event.target.value)}
+                />
+              </Field>
+            ) : (
+              <Field label="URL">
+                <Input
+                  value={BUILTIN_EMBEDDING.urls[source]}
+                  readOnly
+                  className="text-muted-foreground font-mono text-xs md:text-xs"
+                />
+              </Field>
+            )}
+          </div>
+          <p className="text-muted-foreground text-xs">
+            {t("emb.offline", { file: BUILTIN_EMBEDDING.file })}
+          </p>
+        </div>
+      ) : (
+        <div className="flex flex-col gap-3">
+          <div className="flex flex-wrap gap-1.5">
+            {REMOTE_EMBEDDING_PRESETS.map((preset) => (
+              <Button
+                key={preset.id}
+                size="xs"
+                variant="outline"
+                onClick={() => {
+                  setBaseURL(preset.baseURL);
+                  setModel(preset.model);
+                }}
+              >
+                {preset.name}
+              </Button>
+            ))}
+          </div>
+          <div className="grid gap-3 sm:grid-cols-3">
+            <Field label={t("settings.baseURL")}>
+              <Input
+                value={baseURL}
+                placeholder="http://127.0.0.1:11434/v1"
+                onChange={(event) => setBaseURL(event.target.value)}
+              />
+            </Field>
+            <Field label={t("emb.model")}>
+              <Input
+                value={model}
+                onChange={(event) => setModel(event.target.value)}
+              />
+            </Field>
+            <Field
+              label={t("emb.apiKey")}
+              hint={settings.remote.keyHint ?? undefined}
+            >
+              <Input
+                type="password"
+                autoComplete="off"
+                value={apiKey}
+                placeholder={
+                  settings.remote.hasKey
+                    ? t("emb.apiKey.keep")
+                    : t("common.optional")
+                }
+                onChange={(event) => setApiKey(event.target.value)}
+              />
+            </Field>
+          </div>
+          <p className="text-muted-foreground text-xs">
+            {t("emb.remote.hint")}
+          </p>
+        </div>
+      )}
+
+      <Field label={t("emb.instruction")} hint={t("emb.instruction.hint")}>
+        <Textarea
+          rows={2}
+          value={instruction}
+          placeholder={DEFAULT_QUERY_INSTRUCTION}
+          onChange={(event) => setInstruction(event.target.value)}
+          className="font-mono text-xs md:text-xs"
+        />
+      </Field>
+
+      <div className="flex flex-wrap items-center gap-2">
+        <Button size="sm" disabled={saving} onClick={() => void save()}>
+          {saving ? <Spinner /> : null}
+          {t("common.save")}
+        </Button>
+        <Button
+          size="sm"
+          variant="outline"
+          disabled={testing}
+          onClick={() => void test()}
+        >
+          {testing ? <Spinner /> : <PlugZapIcon />}
+          {t("emb.test")}
+        </Button>
+        {testResult ? (
+          <span className="text-muted-foreground text-xs wrap-break-word">
+            {testResult}
+          </span>
+        ) : null}
+      </div>
+    </Section>
+  );
+}
+
+/* ------------------------------------------------------------------- ocr */
+
+const OCR_LANGS = [
+  { value: "ch", label: "ch · 中文 / English / 日本語" },
+  { value: "chinese_cht", label: "chinese_cht · 繁體中文" },
+  { value: "japan", label: "japan · 日本語" },
+  { value: "korean", label: "korean · 한국어" },
+  { value: "en", label: "en · English" },
+];
+
+function OcrSettings({
+  settings,
+  onSaved,
+}: {
+  settings: PublicSettings["ocr"];
+  onSaved: (settings: PublicSettings) => void;
+}) {
+  const { t } = useI18n();
+  const [url, setUrl] = useState(settings.url);
+  const [lang, setLang] = useState(settings.lang || "ch");
+  const [health, setHealth] = useState<{ ok: boolean; error?: string } | null>(
+    null,
+  );
+  const [saving, setSaving] = useState(false);
+
+  const check = useCallback(async () => {
+    setHealth(null);
+    try {
+      setHealth(await api<{ ok: boolean; error?: string }>("/api/ocr"));
+    } catch (error) {
+      setHealth({ ok: false, error: errorMessage(error) });
+    }
+  }, []);
+
+  useEffect(() => {
+    // Async loader: state is only set after the request resolves.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    void check();
+  }, [check]);
+
+  const save = async () => {
+    setSaving(true);
+    try {
+      onSaved(await saveSettings({ ocr: { url: url.trim() || null, lang } }));
+      toast.add({ title: t("settings.saved") });
+      await check();
+    } catch (error) {
+      notifyError(t("common.error"), error);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  return (
+    <Section
+      title={t("ocr.title")}
+      description={t("ocr.hint")}
+      actions={
+        health === null ? (
+          <Spinner />
+        ) : health.ok ? (
+          <Badge variant="success">
+            <CheckIcon />
+            {t("ocr.ok")}
+          </Badge>
+        ) : (
+          <Badge
+            variant="destructive"
+            title={health.error}
+            className="max-w-64 truncate"
+          >
+            <CircleAlertIcon />
+            {t("ocr.fail", { error: health.error ?? "" })}
+          </Badge>
+        )
+      }
+    >
+      <form
+        className="grid items-end gap-3 sm:grid-cols-[1fr_16rem_auto]"
+        onSubmit={(event) => {
+          event.preventDefault();
+          void save();
+        }}
+      >
+        <Field label={t("ocr.url")}>
+          <Input
+            value={url}
+            placeholder="http://127.0.0.1:8866"
+            onChange={(event) => setUrl(event.target.value)}
+          />
+        </Field>
+        <Field label={t("ocr.lang")}>
+          <NativeSelect
+            value={lang}
+            onChange={(event) => setLang(event.target.value)}
+          >
+            {OCR_LANGS.map((item) => (
+              <option key={item.value} value={item.value}>
+                {item.label}
+              </option>
+            ))}
+          </NativeSelect>
+        </Field>
+        <Button type="submit" disabled={saving}>
+          {saving ? <Spinner /> : null}
+          {t("common.save")}
+        </Button>
+      </form>
+    </Section>
+  );
+}
+
 function Appearance() {
   const { t, lang, setLang } = useI18n();
   const { theme, setTheme } = useTheme();
@@ -520,7 +1181,16 @@ export function SettingsView() {
             settings={settings.meilisearch}
             onSaved={setSettings}
           />
+          <ConnectionSettings
+            settings={settings.connections}
+            onSaved={setSettings}
+          />
           <LlmSettings settings={settings.llm} onSaved={setSettings} />
+          <EmbeddingSettings
+            settings={settings.embedding}
+            onSaved={setSettings}
+          />
+          <OcrSettings settings={settings.ocr} onSaved={setSettings} />
           <Appearance />
         </>
       ) : !error ? (

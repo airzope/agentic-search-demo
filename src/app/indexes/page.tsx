@@ -1,5 +1,6 @@
-import { IndexesView } from "@/components/views/indexes-view";
+import { redirect } from "next/navigation";
 
+/** The index page became the knowledge-base page. */
 export default function Page() {
-  return <IndexesView />;
+  redirect("/kb");
 }

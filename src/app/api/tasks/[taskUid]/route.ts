@@ -1,14 +1,17 @@
-import { badRequest, getMeili, handle } from "@/lib/meili";
+import type { NextRequest } from "next/server";
 
+import { badRequest, getMeili, handle, parseKbId } from "@/lib/meili";
+
+/** Task status; `?kb=` picks the connection the task belongs to. */
 export async function GET(
-  _request: Request,
+  request: NextRequest,
   context: RouteContext<"/api/tasks/[taskUid]">,
 ) {
   return handle(async () => {
-    const { taskUid } = await context.params;
-    const uid = Number(taskUid);
+    const uid = Number((await context.params).taskUid);
     if (!Number.isInteger(uid) || uid < 0) return badRequest("Invalid task");
-    const task = await (await getMeili()).tasks.getTask(uid);
-    return Response.json(task);
+    const kb = request.nextUrl.searchParams.get("kb");
+    const client = await getMeili(kb ? parseKbId(kb).connectionId : undefined);
+    return Response.json(await client.tasks.getTask(uid));
   });
 }

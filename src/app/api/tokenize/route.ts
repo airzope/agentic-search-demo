@@ -1,4 +1,4 @@
-import { badRequest, handle } from "@/lib/meili";
+import { badRequest, handle, parseKbId } from "@/lib/meili";
 import {
   MAX_PREVIEW_CHARS,
   previewTokens,
@@ -6,6 +6,8 @@ import {
 } from "@/lib/tokenize";
 
 type TokenizeBody = TokenizerSettings & {
+  /** Knowledge base whose Meilisearch instance tokenizes (defaults to local). */
+  kb?: string;
   text?: string;
   /** Meilisearch locale such as "cmn", or null for auto-detection. */
   locale?: string | null;
@@ -34,6 +36,7 @@ export async function POST(request: Request) {
         stopWords: stringList(body.stopWords),
       },
       body.locale || null,
+      body.kb ? parseKbId(body.kb).connectionId : undefined,
     );
     return Response.json({ ...result, tookMs: Date.now() - started });
   });

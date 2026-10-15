@@ -19,8 +19,8 @@ export function SearchControls({
   stacked?: boolean;
 }) {
   const { t } = useI18n();
-  const { prefs, setPrefs, embedders } = useWorkspace();
-  const hasEmbedder = embedders.length > 0;
+  const { prefs, setPrefs, embedders, semanticAvailable } = useWorkspace();
+  const hasEmbedder = semanticAvailable;
 
   return (
     <div

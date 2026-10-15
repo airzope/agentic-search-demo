@@ -182,7 +182,42 @@ export type PublicProvider = {
   configured: boolean;
 };
 
+/** A Meilisearch instance. `local` comes from the classic Meilisearch settings. */
+export type PublicConnection = {
+  id: string;
+  name: string;
+  host: string;
+  hasKey: boolean;
+  keyHint: string | null;
+  builtin: boolean;
+};
+
+export type EmbeddingEngine = "builtin" | "remote";
+export type ModelSource = "huggingface" | "hf-mirror" | "modelscope" | "custom";
+
+export type PublicEmbedding = {
+  engine: EmbeddingEngine;
+  builtin: {
+    model: string;
+    file: string;
+    source: ModelSource;
+    url: string;
+  };
+  remote: {
+    baseURL: string;
+    model: string;
+    hasKey: boolean;
+    keyHint: string | null;
+  };
+  queryInstruction: string;
+};
+
+export type PublicOcr = { url: string; lang: string };
+
 export type PublicSettings = {
+  connections: PublicConnection[];
+  embedding: PublicEmbedding;
+  ocr: PublicOcr;
   meilisearch: {
     host: string;
     hostSource: "settings" | "env" | "default";
@@ -202,6 +237,25 @@ export type PublicSettings = {
  */
 export type SettingsPatch = {
   meilisearch?: { host?: string | null; apiKey?: string | null };
+  connections?: {
+    upsert?: {
+      id: string;
+      name?: string;
+      host?: string;
+      apiKey?: string | null;
+    }[];
+    remove?: string[];
+  };
+  embedding?: {
+    engine?: EmbeddingEngine | null;
+    source?: ModelSource | null;
+    url?: string | null;
+    baseURL?: string | null;
+    apiKey?: string | null;
+    model?: string | null;
+    queryInstruction?: string | null;
+  };
+  ocr?: { url?: string | null; lang?: string | null };
   llm?: {
     active?: string | null;
     providers?: Record<
@@ -214,3 +268,51 @@ export type SettingsPatch = {
     >;
   };
 };
+
+/** The model shipped with the app: Qwen3-Embedding-0.6B as GGUF for llama.cpp. */
+export const BUILTIN_EMBEDDING = {
+  id: "qwen3-embedding-0.6b",
+  file: "Qwen3-Embedding-0.6B-Q8_0.gguf",
+  dimensions: 1024,
+  /** Qwen3-Embedding supports Matryoshka (MRL) truncation down to 32 dims. */
+  dimensionOptions: [1024, 768, 512, 256] as const,
+  urls: {
+    huggingface:
+      "https://huggingface.co/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    "hf-mirror":
+      "https://hf-mirror.com/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/main/Qwen3-Embedding-0.6B-Q8_0.gguf",
+    modelscope:
+      "https://modelscope.cn/models/Qwen/Qwen3-Embedding-0.6B-GGUF/resolve/master/Qwen3-Embedding-0.6B-Q8_0.gguf",
+  },
+} as const;
+
+export const DEFAULT_QUERY_INSTRUCTION =
+  "Given a web search query, retrieve relevant passages that answer the query";
+
+/** Common OpenAI-compatible embedding services for Qwen3-Embedding. */
+export const REMOTE_EMBEDDING_PRESETS = [
+  {
+    id: "ollama",
+    name: "Ollama",
+    baseURL: "http://127.0.0.1:11434/v1",
+    model: "qwen3-embedding:0.6b",
+  },
+  {
+    id: "llamacpp",
+    name: "llama.cpp / TEI / vLLM",
+    baseURL: "http://127.0.0.1:8080/v1",
+    model: "Qwen/Qwen3-Embedding-0.6B",
+  },
+  {
+    id: "dashscope",
+    name: "阿里云百炼 text-embedding-v4",
+    baseURL: "https://dashscope.aliyuncs.com/compatible-mode/v1",
+    model: "text-embedding-v4",
+  },
+  {
+    id: "siliconflow",
+    name: "硅基流动 Qwen3-Embedding-8B",
+    baseURL: "https://api.siliconflow.cn/v1",
+    model: "Qwen/Qwen3-Embedding-8B",
+  },
+] as const;

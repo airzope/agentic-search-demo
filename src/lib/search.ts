@@ -4,7 +4,6 @@ import type { Index, SearchParams } from "meilisearch";
 
 import { HIGHLIGHT_POST, HIGHLIGHT_PRE } from "@/lib/cjk";
 import { inferDisplayFields } from "@/lib/display";
-import { getMeili } from "@/lib/meili";
 import type { SearchMode, SearchPrefs } from "@/lib/types";
 
 export function hybridFor(prefs: Partial<SearchPrefs>) {
@@ -57,10 +56,6 @@ export async function describeIndex(index: Index) {
       sample.results as Record<string, unknown>[],
     ),
   };
-}
-
-export async function getIndex(uid: string) {
-  return (await getMeili()).index(uid);
 }
 
 /** Default query locales: the locales declared in `localizedAttributes`. */

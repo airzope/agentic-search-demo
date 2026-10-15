@@ -67,8 +67,12 @@ function fingerprint(settings: Settings) {
 }
 
 /** Make the scratch index carry `settings` and exactly one document. */
-async function prepareScratchIndex(settings: Settings, text: string) {
-  const client = await getMeili();
+async function prepareScratchIndex(
+  settings: Settings,
+  text: string,
+  connectionId?: string,
+) {
+  const client = await getMeili(connectionId);
   const index = client.index(PREVIEW_INDEX);
 
   let current: Settings | null = null;
@@ -97,6 +101,7 @@ export function previewTokens(
   text: string,
   tokenizer: TokenizerSettings,
   locale: string | null,
+  connectionId?: string,
 ) {
   return exclusive(async () => {
     const index = await prepareScratchIndex(
@@ -115,6 +120,7 @@ export function previewTokens(
           : [],
       },
       text,
+      connectionId,
     );
 
     const bytes = Buffer.from(text, "utf8");

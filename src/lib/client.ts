@@ -35,11 +35,16 @@ export const jsonBody = (value: unknown) => JSON.stringify(value);
 const FINISHED = new Set(["succeeded", "failed", "canceled"]);
 
 /** Poll a Meilisearch task until it finishes; throws if it failed. */
-export async function waitForTask(taskUid: number, timeoutMs = 10 * 60_000) {
+export async function waitForTask(
+  taskUid: number,
+  kbId?: string | null,
+  timeoutMs = 10 * 60_000,
+) {
+  const query = kbId ? `?kb=${encodeURIComponent(kbId)}` : "";
   const started = Date.now();
   let delay = 150;
   while (Date.now() - started < timeoutMs) {
-    const task = await api<Task>(`/api/tasks/${taskUid}`);
+    const task = await api<Task>(`/api/tasks/${taskUid}${query}`);
     if (FINISHED.has(task.status)) {
       if (task.status !== "succeeded") {
         throw new Error(task.error?.message ?? `Task ${task.status}`);

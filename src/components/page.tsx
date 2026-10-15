@@ -92,7 +92,7 @@ export function EmptyState({
  */
 export function RequireIndex({ children }: { children: ReactNode }) {
   const { t } = useI18n();
-  const { status, indexes, indexUid } = useWorkspace();
+  const { status, kbs, kbId } = useWorkspace();
 
   if (status && !status.meilisearch.ok) {
     return (
@@ -115,20 +115,20 @@ export function RequireIndex({ children }: { children: ReactNode }) {
       />
     );
   }
-  if (indexes === null) {
+  if (kbs === null) {
     return (
       <div className="text-muted-foreground flex items-center gap-2 py-10 text-sm">
         <Spinner /> {t("common.loading")}
       </div>
     );
   }
-  if (!indexUid) {
+  if (!kbId) {
     return (
       <EmptyState
         title={t("empty.noIndex.title")}
         description={t("empty.noIndex.desc")}
         action={
-          <Button nativeButton={false} render={<Link href="/indexes" />}>
+          <Button nativeButton={false} render={<Link href="/kb" />}>
             {t("empty.noIndex.action")}
           </Button>
         }
