@@ -1,130 +1,80 @@
-import { anthropic } from "@ai-sdk/anthropic";
-import {
-  meilisearchSearch,
-  meilisearchSearchSimilar,
-} from "@meilisearch/ai-sdk";
-import {
-  convertToModelMessages,
-  createUIMessageStreamResponse,
-  stepCountIs,
-  streamText,
-  toUIMessageStream,
-  type UIMessage,
-} from "ai";
+import { createUIMessageStream, createUIMessageStreamResponse } from "ai";
 
-export const maxDuration = 30;
+import { runChat } from "@/lib/agent/run";
+import type { ChatMessage } from "@/lib/agent/types";
+import { LlmConfigError, getProvider } from "@/lib/llm";
+import { parseKbId } from "@/lib/meili";
+import { requireOntologyConnection } from "@/lib/ontology/store";
+import type { SearchPrefs } from "@/lib/types";
 
-const meilisearch = {
-  host: process.env.MEILISEARCH_HOST!,
-  apiKey: process.env.MEILISEARCH_SEARCH_API_KEY,
-  indexUid: process.env.MEILISEARCH_INDEX!,
+export const maxDuration = 300;
+
+type ChatBody = {
+  /** Conversation id; lets the user steer the run while it works. */
+  id?: string;
+  messages: ChatMessage[];
+  kbs?: string[];
+  /** Ontology connection ids. */
+  ontologies?: string[];
+  provider?: string;
+  model?: string;
+  search?: Partial<SearchPrefs>;
+  /** Deep research mode for complex questions. */
+  deep?: boolean;
 };
 
-const tools = {
-  searchMovies: meilisearchSearch({
-    ...meilisearch,
-    description: "Search movies by title or description",
-    searchParams: {
-      hybrid: {
-        embedder: "small",
-        semanticRatio: 0.5,
-      },
-    },
-  }),
-  searchSimilarMovies: meilisearchSearchSimilar({
-    ...meilisearch,
-    description: "Find similar movies by document ID",
-    searchSimilarParams: {
-      embedder: "small",
-      limit: 10,
-    },
-  }),
-};
-
-function hitCount(output: unknown) {
-  if (!output || typeof output !== "object") return 0;
-  const hits = (output as { hits?: unknown }).hits;
-  return Array.isArray(hits) ? hits.length : 0;
-}
-
-function streamErrorText(error: unknown) {
+function errorText(error: unknown) {
   if (error instanceof Error && error.message.trim()) return error.message;
   if (typeof error === "string" && error.trim()) return error;
   return "An error occurred.";
 }
 
-export async function POST(req: Request) {
+/**
+ * Chat: a pi agent with knowledge-base tools (search / browse / read) and
+ * ontology tools (OSDK), streamed as UI messages.
+ */
+export async function POST(request: Request) {
+  let body: ChatBody;
   try {
-    const { messages }: { messages: UIMessage[] } = await req.json();
+    body = (await request.json()) as ChatBody;
+  } catch {
+    return new Response("Invalid request body", { status: 400 });
+  }
 
-    const result = streamText({
-      model: anthropic(process.env.ANTHROPIC_MODEL ?? "claude-sonnet-4-5"),
-      system: `
-      You are a movie assistant. Your task is to recommend streaming platforms to watch movies.
+  try {
+    const kbIds = [...new Set((body.kbs ?? []).map((id) => parseKbId(id).id))];
+    const ontologies = await Promise.all(
+      [...new Set(body.ontologies ?? [])].map(requireOntologyConnection),
+    );
+    if (!kbIds.length && !ontologies.length) {
+      return new Response("Select at least one knowledge base or ontology.", {
+        status: 400,
+      });
+    }
+    const provider = await getProvider(body.provider);
+    const modelId = body.model?.trim() || provider.model;
+    if (!modelId)
+      throw new LlmConfigError(`${provider.name}: model is missing.`);
 
-      ## Steps
-
-      1. Always use your tools to search movies and find streaming platforms to watch them.
-      2. Think how you can combine prose and movie blocks to offer the most helpful answer.
-
-      ## Output Format
-
-      You can display UI components by using the Comark syntax. When recommending movies, interleave prose with \`movies\` blocks using this grammar:
-
-      ::movies{:ids="[389, 550, 13]"}
-      ::
-
-      Usage:
-      - The \`ids\` property is a JSON array of movie document \`id\`s from tool results.
-      - Place \`::movies\` and closing \`::\` at column 0, on their own lines.
-      - Never wrap movie blocks in code fences.
-
-      Valid style example:
-
-      If you like this vibe, here are picks:
-      ::movies{:ids="[1, 2, 3]"}
-      ::
-      If you want alternatives:
-      ::movies{:ids="[4, 5]"}
-      ::
-
-      ## Rules
-
-      - If comparing options, you can emit multiple movie blocks in one answer.
-      - Do not duplicate the same recommendations in movie blocks as markdown lists.
-      - Only offer follow-up actions that match your tools capabilities. Do not offer any follow-up actions unless they make sense.
-      `,
-      messages: await convertToModelMessages(messages),
-      tools,
-      stopWhen: stepCountIs(5),
-      onToolExecutionStart({ toolCall }) {
-        console.info(`[chat] tool ${toolCall.toolName}`, toolCall.input);
-      },
-      onToolExecutionEnd({ toolCall, toolOutput }) {
-        if (toolOutput.type === "tool-error") {
-          console.error(
-            `[chat] tool ${toolCall.toolName} error`,
-            toolOutput.error,
-          );
-          return;
-        }
-
-        console.info(
-          `[chat] tool ${toolCall.toolName} → ${hitCount(toolOutput.output)} responses`,
-        );
-      },
-      onStepEnd({ text }) {
-        if (text.trim()) console.info("[chat] assistant:", text);
-      },
+    const stream = createUIMessageStream<ChatMessage>({
+      execute: ({ writer }) =>
+        runChat({
+          chatId: body.id || crypto.randomUUID(),
+          messages: body.messages ?? [],
+          kbIds,
+          ontologies,
+          provider,
+          modelId,
+          prefs: body.search ?? {},
+          deep: Boolean(body.deep),
+          signal: request.signal,
+          writer,
+        }),
+      onError: errorText,
     });
-
-    return createUIMessageStreamResponse({
-      stream: toUIMessageStream({
-        stream: result.stream,
-        onError: streamErrorText,
-      }),
-    });
+    return createUIMessageStreamResponse({ stream });
   } catch (error) {
-    return new Response(streamErrorText(error), { status: 500 });
+    const status = error instanceof LlmConfigError ? 400 : 500;
+    return new Response(errorText(error), { status });
   }
 }

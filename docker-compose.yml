@@ -1,0 +1,34 @@
+# Local services for CJK Search Studio.
+#   docker compose up -d                    → Meilisearch on http://127.0.0.1:7700
+#   docker compose --profile ollama up -d   → also Ollama (local LLM + embeddings)
+services:
+  meilisearch:
+    image: getmeili/meilisearch:v1.55
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:7700:7700"
+    environment:
+      # Must match MEILISEARCH_API_KEY used by the app (see .env.example).
+      MEILI_MASTER_KEY: ${MEILISEARCH_API_KEY:-cjk-studio-local-master-key}
+      MEILI_ENV: development
+      MEILI_NO_ANALYTICS: "true"
+      # Meilisearch blocks private IPs for embedder requests by default; allow
+      # them so embedders can reach Ollama or other services on your machine/LAN.
+      MEILI_EXPERIMENTAL_ALLOWED_IP_NETWORKS: "127.0.0.0/8,10.0.0.0/8,172.16.0.0/12,192.168.0.0/16"
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    volumes:
+      - meili_data:/meili_data
+
+  ollama:
+    image: ollama/ollama:latest
+    profiles: ["ollama"]
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:11434:11434"
+    volumes:
+      - ollama_data:/root/.ollama
+
+volumes:
+  meili_data:
+  ollama_data:
