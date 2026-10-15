@@ -9,7 +9,8 @@
     "lint": "eslint .",
     "lint:fix": "eslint . --fix",
     "format": "prettier --write .",
-    "format:check": "prettier --check ."
+    "format:check": "prettier --check .",
+    "mock:foundry": "node scripts/mock-foundry.mjs"
   },
   "dependencies": {
     "@ai-sdk/react": "^4.0.145",
@@ -19,6 +20,10 @@
     "@earendil-works/pi-ai": "1.2.0",
     "@firecrawl/anydoc": "^0.2.4",
     "@napi-rs/canvas": "1.0.11",
+    "@osdk/api": "2.80.0",
+    "@osdk/client": "2.80.0",
+    "@osdk/foundry.ontologies": "2.78.0",
+    "@osdk/oauth": "1.14.0",
     "@shadcn/react": "^0.3.0",
     "ai": "^7.0.141",
     "class-variance-authority": "^0.7.1",

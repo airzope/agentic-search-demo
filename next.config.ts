@@ -14,6 +14,9 @@ const nextConfig: NextConfig = {
     "utif2",
     "@earendil-works/pi-ai",
     "@earendil-works/pi-agent-core",
+    "@osdk/client",
+    "@osdk/oauth",
+    "@osdk/foundry.ontologies",
   ],
 };
 

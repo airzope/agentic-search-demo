@@ -2,7 +2,7 @@
  * Conversations kept in the browser (localStorage): an index of chats plus
  * the messages of each one. Large tool outputs are trimmed before saving.
  */
-import type { ChatMessage } from "@/lib/agent/types";
+import type { ChatMessage, Verification } from "@/lib/agent/types";
 import { readStorage, writeStorage } from "@/lib/client";
 
 export type ChatSummary = {
@@ -15,6 +15,7 @@ export type ChatSummary = {
 
 const INDEX_KEY = "cjk-studio.chats";
 const messagesKey = (id: string) => `cjk-studio.chat:${id}`;
+const verifyKey = (id: string) => `cjk-studio.verify:${id}`;
 const MAX_CHATS = 60;
 const MAX_TEXT = 1500;
 
@@ -89,9 +90,25 @@ export function saveChat(id: string, messages: ChatMessage[], kbs?: string[]) {
 function removeMessages(id: string) {
   try {
     localStorage.removeItem(messagesKey(id));
+    localStorage.removeItem(verifyKey(id));
   } catch {
     // storage unavailable
   }
+}
+
+/** Answer verifications of a chat, by message id. */
+export function loadVerifications(id: string): Record<string, Verification> {
+  const value = readStorage<Record<string, Verification>>(verifyKey(id), {});
+  return value && typeof value === "object" ? value : {};
+}
+
+export function saveVerification(id: string, verification: Verification) {
+  const all = {
+    ...loadVerifications(id),
+    [verification.messageId]: verification,
+  };
+  writeStorage(verifyKey(id), all);
+  return all;
 }
 
 export function deleteChat(id: string) {

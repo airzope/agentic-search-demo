@@ -19,6 +19,7 @@ import {
   RotateCcwIcon,
   SearchIcon,
   SendIcon,
+  ShieldCheckIcon,
   SlidersHorizontalIcon,
   SquareIcon,
   SquarePenIcon,
@@ -26,9 +27,7 @@ import {
 } from "lucide-react";
 import Link from "next/link";
 import {
-  createContext,
   useCallback,
-  useContext,
   useEffect,
   useMemo,
   useState,
@@ -39,8 +38,25 @@ import {
 } from "react";
 
 import { useI18n, useWorkspace } from "@/components/app-providers";
+import {
+  OntologyToolStep,
+  isOntologyStep,
+} from "@/components/chat/ontology-steps";
+import {
+  SourceCard,
+  SourceRow,
+  SourceTile,
+  SourcesContext,
+  isToolPart,
+  sourceOrigin,
+  sourceTitle,
+  useSources,
+  type ToolPart,
+} from "@/components/chat/sources";
+import { VerificationPanel } from "@/components/chat/verification";
 import { DocViewer, type DocTarget } from "@/components/doc-viewer";
 import { KbScopePicker } from "@/components/kb-scope";
+import { OntologyViewer } from "@/components/ontology/object-viewer";
 import { EmptyState, RequireIndex } from "@/components/page";
 import { SearchControls } from "@/components/search-controls";
 import { Bubble, BubbleContent } from "@/components/ui/bubble";
@@ -72,18 +88,22 @@ import { toast } from "@/components/ui/toaster";
 import { citedNumbers, linkCitations } from "@/lib/agent/citations";
 import {
   collectSources,
+  isOntologySource,
   type BrowseToolOutput,
   type ChatMessage,
   type ReadToolOutput,
   type SearchToolOutput,
   type Source,
+  type Verification,
 } from "@/lib/agent/types";
 import {
   deleteChat,
   listChats,
   loadMessages,
+  loadVerifications,
   newChatId,
   saveChat,
+  saveVerification,
   type ChatSummary,
 } from "@/lib/chat-store";
 import { guessLang, isComposing } from "@/lib/cjk";
@@ -97,18 +117,6 @@ import {
 import type { PublicSettings } from "@/lib/providers";
 import { getSampleByIndex } from "@/lib/samples";
 import { cn } from "@/lib/utils";
-
-type ToolPart = {
-  type: string;
-  toolCallId: string;
-  state: string;
-  input?: unknown;
-  output?: unknown;
-  errorText?: string;
-};
-
-const isToolPart = (part: { type: string }): part is ToolPart =>
-  part.type.startsWith("tool-");
 
 const PROVIDER_KEY = "cjk-studio.provider";
 const DEEP_KEY = "cjk-studio.deep";
@@ -147,37 +155,9 @@ const markdownClassName = cn(
   "[&_th]:bg-muted/50 [&_th]:border [&_th]:px-2 [&_th]:py-1.5 [&_th]:font-medium [&_td]:border [&_td]:px-2 [&_td]:py-1.5",
 );
 
-/** Sources of the conversation (by citation number) and the document opener. */
-const SourcesContext = createContext<{
-  sources: Map<number, Source>;
-  open: (source: Source) => void;
-}>({ sources: new Map(), open: () => undefined });
-
-function SourceCard({ source }: { source: Source }) {
-  return (
-    <div
-      className="flex flex-col gap-1"
-      lang={guessLang(`${source.title ?? ""}${source.snippet ?? ""}`)}
-    >
-      <p className="text-muted-foreground truncate text-[11px]">
-        {[source.kb, source.path].filter(Boolean).join(" · ")}
-      </p>
-      <p className="font-medium">{source.title || source.path || source.ref}</p>
-      {source.heading ? (
-        <p className="text-muted-foreground text-xs">{source.heading}</p>
-      ) : null}
-      {source.snippet ? (
-        <p className="text-muted-foreground line-clamp-6 text-xs leading-relaxed">
-          {source.snippet}
-        </p>
-      ) : null}
-    </div>
-  );
-}
-
 function Citation({ n }: { n: number }) {
   const { t } = useI18n();
-  const { sources, open } = useContext(SourcesContext);
+  const { sources, open } = useSources();
   const source = sources.get(n);
   return (
     <Popover>
@@ -197,7 +177,11 @@ function Citation({ n }: { n: number }) {
             onClick={() => open(source)}
           >
             <BookOpenIcon />
-            {t("chat.openSource")}
+            {source.kind === "object"
+              ? t("onto.openObject")
+              : isOntologySource(source)
+                ? t("onto.openDetail")
+                : t("chat.openSource")}
           </Button>
         ) : null}
       </PopoverContent>
@@ -213,7 +197,7 @@ function LegacyCitation({
   refId: string;
   children: ReactNode;
 }) {
-  const { open } = useContext(SourcesContext);
+  const { open } = useSources();
   return (
     <button
       type="button"
@@ -270,7 +254,7 @@ const markdownComponents = {
 };
 
 function AnswerText({ text, streaming }: { text: string; streaming: boolean }) {
-  const { sources } = useContext(SourcesContext);
+  const { sources } = useSources();
   const value = useMemo(
     () => linkCitations(text, (n) => sources.has(n)),
     [text, sources],
@@ -300,40 +284,9 @@ const joinQueries = (queries: unknown, lang: string) =>
         .join(" ")
     : "";
 
-function SourceRow({ source }: { source: Source }) {
-  const { open } = useContext(SourcesContext);
-  return (
-    <li
-      className="flex gap-2"
-      lang={guessLang(`${source.title ?? ""}${source.snippet ?? ""}`)}
-    >
-      <span className="bg-muted text-muted-foreground mt-px flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums">
-        {source.n}
-      </span>
-      <div className="flex min-w-0 flex-col gap-0.5">
-        <button
-          type="button"
-          className="text-left font-medium underline-offset-3 hover:underline"
-          onClick={() => open(source)}
-        >
-          {source.title || source.path || source.ref}
-        </button>
-        <span className="text-muted-foreground truncate">
-          {[source.kb, source.path, source.heading].filter(Boolean).join(" · ")}
-        </span>
-        {source.snippet ? (
-          <span className="text-muted-foreground line-clamp-2">
-            {source.snippet}
-          </span>
-        ) : null}
-      </div>
-    </li>
-  );
-}
-
 function ToolStep({ part }: { part: ToolPart }) {
   const { t, lang } = useI18n();
-  const { open } = useContext(SourcesContext);
+  const { open } = useSources();
   const done = part.state === "output-available";
 
   if (part.state === "output-error") {
@@ -346,6 +299,8 @@ function ToolStep({ part }: { part: ToolPart }) {
       </Marker>
     );
   }
+
+  if (isOntologyStep(part)) return <OntologyToolStep part={part} />;
 
   if (part.type === "tool-browse") {
     const input = (part.input ?? {}) as { branch?: string };
@@ -450,7 +405,7 @@ function ToolStep({ part }: { part: ToolPart }) {
 /** Sources cited in one answer, plus the ones retrieved but not cited. */
 function AnswerSources({ message }: { message: ChatMessage }) {
   const { t } = useI18n();
-  const { sources } = useContext(SourcesContext);
+  const { sources } = useSources();
   const text = message.parts
     .map((part) => (part.type === "text" ? part.text : ""))
     .join("\n");
@@ -497,32 +452,6 @@ function AnswerSources({ message }: { message: ChatMessage }) {
   );
 }
 
-function SourceTile({ source }: { source: Source }) {
-  const { open } = useContext(SourcesContext);
-  return (
-    <li>
-      <button
-        type="button"
-        onClick={() => open(source)}
-        className="hover:bg-muted/60 flex w-full items-start gap-2 rounded-lg border p-2 text-left transition-colors"
-        lang={guessLang(source.title ?? "")}
-      >
-        <span className="bg-primary/10 text-primary mt-px flex h-4.5 min-w-4.5 shrink-0 items-center justify-center rounded-full px-1 text-[11px] font-semibold tabular-nums">
-          {source.n}
-        </span>
-        <span className="flex min-w-0 flex-col">
-          <span className="truncate font-medium">
-            {source.title || source.path || source.ref}
-          </span>
-          <span className="text-muted-foreground truncate">
-            {[source.kb, source.path].filter(Boolean).join(" · ")}
-          </span>
-        </span>
-      </button>
-    </li>
-  );
-}
-
 /* ---------------------------------------------------------------- chat */
 
 function errorText(error: unknown) {
@@ -544,7 +473,8 @@ function copyText(message: ChatMessage, sources: Map<number, Source>) {
   const list = cited
     .map((n) => {
       const source = sources.get(n)!;
-      return `[${n}] ${source.title || source.ref}${source.path ? ` — ${source.path}` : ""}`;
+      const origin = sourceOrigin(source);
+      return `[${n}] ${sourceTitle(source)}${origin ? ` — ${origin}` : ""}`;
     })
     .join("\n");
   return `${text}\n\n${list}`;
@@ -555,14 +485,23 @@ function AssistantMessage({
   streaming,
   last,
   onRegenerate,
+  verification,
+  verifying,
+  onVerify,
 }: {
   message: ChatMessage;
   streaming: boolean;
   last: boolean;
   onRegenerate: () => void;
+  verification?: Verification;
+  verifying: boolean;
+  onVerify: () => void;
 }) {
   const { t } = useI18n();
-  const { sources } = useContext(SourcesContext);
+  const { sources } = useSources();
+  const hasText = message.parts.some(
+    (part) => part.type === "text" && part.text.trim(),
+  );
   const [copied, setCopied] = useState(false);
   const meta = message.metadata;
 
@@ -629,6 +568,13 @@ function AssistantMessage({
         return null;
       })}
       {!streaming ? <AnswerSources message={message} /> : null}
+      {!streaming && verification ? (
+        <VerificationPanel
+          verification={verification}
+          running={verifying}
+          onRerun={onVerify}
+        />
+      ) : null}
       {!streaming ? (
         <div className="text-muted-foreground/80 flex flex-wrap items-center gap-x-1 gap-y-0.5 text-[11px]">
           <Button
@@ -640,6 +586,19 @@ function AssistantMessage({
           >
             {copied ? <CheckIcon /> : <CopyIcon />}
           </Button>
+          {hasText && !verification ? (
+            <Button
+              variant="ghost"
+              size="xs"
+              className="text-muted-foreground"
+              disabled={verifying}
+              title={t("verify.title")}
+              onClick={onVerify}
+            >
+              {verifying ? <Spinner /> : <ShieldCheckIcon />}
+              {verifying ? t("verify.running") : t("verify.run")}
+            </Button>
+          ) : null}
           {last ? (
             <Button
               variant="ghost"
@@ -683,7 +642,7 @@ function ChatBody({
   history: ReactNode;
 }) {
   const { t } = useI18n();
-  const { kbs, scope, prefs } = useWorkspace();
+  const { kbs, scope, prefs, ontologies, ontologyScope } = useWorkspace();
   const configured = providers.providers.filter(
     (provider) => provider.configured,
   );
@@ -691,15 +650,24 @@ function ChatBody({
   const [deep, setDeep] = useState(false);
   const [input, setInput] = useState("");
   const [opened, setOpened] = useState<DocTarget | null>(null);
+  const [openedOntology, setOpenedOntology] = useState<Source | null>(null);
   const [queued, setQueued] = useState<string | null>(null);
+  const [verifications, setVerifications] = useState<
+    Record<string, Verification>
+  >({});
+  const [verifying, setVerifying] = useState<string | null>(null);
 
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- restore from localStorage
     setProviderId(readStorage<string | null>(PROVIDER_KEY, null));
     setDeep(readStorage<boolean>(DEEP_KEY, false));
-  }, []);
+    setVerifications(loadVerifications(chatId));
+  }, [chatId]);
 
   const scopeKbs = (kbs ?? []).filter((kb) => scope.includes(kb.id));
+  const scopeOntologies = (ontologies ?? []).filter((item) =>
+    ontologyScope.includes(item.id),
+  );
   const activeProvider =
     configured.find((provider) => provider.id === providerId) ??
     configured.find((provider) => provider.id === providers.active) ??
@@ -718,10 +686,14 @@ function ChatBody({
   const sources = useMemo(() => collectSources(messages), [messages]);
   const openSource = useCallback(
     (source: Source) => {
+      if (isOntologySource(source)) {
+        setOpenedOntology(source);
+        return;
+      }
       const target = targetOf(source.ref, source.title);
       if (target) setOpened(target);
     },
-    [setOpened],
+    [setOpened, setOpenedOntology],
   );
   const context = useMemo(
     () => ({ sources, open: openSource }),
@@ -730,6 +702,7 @@ function ChatBody({
 
   const requestBody = () => ({
     kbs: scope,
+    ontologies: scopeOntologies.map((item) => item.id),
     provider: activeProvider?.id,
     model: activeProvider?.model,
     search: prefs,
@@ -766,6 +739,33 @@ function ChatBody({
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [busy, queued]);
 
+  /** Check an answer claim by claim against the sources it cites. */
+  const verify = async (messageId: string) => {
+    const index = messages.findIndex((message) => message.id === messageId);
+    if (index < 0) return;
+    setVerifying(messageId);
+    try {
+      const result = await api<Verification>("/api/chat/verify", {
+        method: "POST",
+        body: jsonBody({
+          messages: messages.slice(0, index + 1),
+          messageId,
+          provider: activeProvider?.id,
+          model: activeProvider?.model,
+        }),
+      });
+      setVerifications(saveVerification(chatId, result));
+    } catch (reason) {
+      toast.add({
+        title: t("common.error"),
+        description: errorMessage(reason),
+        type: "error",
+      });
+    } finally {
+      setVerifying(null);
+    }
+  };
+
   const onSubmit = (event: FormEvent) => {
     event.preventDefault();
     send(input);
@@ -775,10 +775,16 @@ function ChatBody({
     .filter((kb) => kb.connectionId === "local")
     .map((kb) => getSampleByIndex(kb.indexUid))
     .find(Boolean);
+  const scopeNames = [
+    ...scopeKbs.map((kb) => kb.name),
+    ...scopeOntologies.map((item) => item.name),
+  ];
   const scopeLabel =
-    scopeKbs.length === 1
-      ? scopeKbs[0].name
-      : t("scope.count", { count: scopeKbs.length });
+    scopeNames.length === 1
+      ? scopeNames[0]
+      : scopeOntologies.length
+        ? t("scope.countMixed", { count: scopeNames.length })
+        : t("scope.count", { count: scopeKbs.length });
 
   const last = messages[messages.length - 1];
   const showThinking =
@@ -813,7 +819,7 @@ function ChatBody({
       <div className="flex min-h-0 flex-1 flex-col">
         <div className="mx-auto flex w-full max-w-3xl shrink-0 flex-wrap items-center gap-2 px-4 pt-3">
           {history}
-          <KbScopePicker />
+          <KbScopePicker ontologies />
           <NativeSelect
             aria-label={t("chat.model")}
             className="min-w-0 flex-1 sm:w-52 sm:flex-none"
@@ -921,6 +927,9 @@ function ChatBody({
                               onRegenerate={() =>
                                 void regenerate({ body: requestBody() })
                               }
+                              verification={verifications[message.id]}
+                              verifying={verifying === message.id}
+                              onVerify={() => void verify(message.id)}
                             />
                           )}
                         </MessageContent>
@@ -1023,6 +1032,11 @@ function ChatBody({
         </div>
       </div>
       <DocViewer target={opened} onClose={() => setOpened(null)} />
+      <OntologyViewer
+        source={openedOntology}
+        ontologies={ontologies}
+        onClose={() => setOpenedOntology(null)}
+      />
     </SourcesContext.Provider>
   );
 }
@@ -1199,9 +1213,13 @@ export function ChatView() {
   );
 }
 
-/** Chat owns its own scrolling, so the empty states get a padded frame. */
+/**
+ * Chat owns its own scrolling, so the empty states get a padded frame. With
+ * an ontology connected, the chat works without any knowledge base.
+ */
 function RequireIndexFrame({ children }: { children: ReactNode }) {
-  const { status, kbId } = useWorkspace();
+  const { status, kbId, ontologies } = useWorkspace();
+  if (ontologies?.length) return children;
   if ((status && !status.meilisearch.ok) || !kbId) {
     return (
       <div className="mx-auto w-full max-w-3xl p-4 md:p-6">

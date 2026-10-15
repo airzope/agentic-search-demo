@@ -1,6 +1,6 @@
 # 设计文档：CJK 搜索工作台
 
-> 第 1–9 节是第一版（分词、混合搜索、多模型问答）；第 10–16 节是第二版（大规模多分支知识库）。
+> 第 1–9 节是第一版（分词、混合搜索、多模型问答）；第 10–16 节是第二版（大规模多分支知识库）；第 17–19 节是第三版（pi agent、内置 OCR、知识库管理）；第 20–24 节是第四版（Palantir OSDK 本体与可信推理）。
 
 > 一个可本地运行、对中日韩（CJK）友好的搜索工作台：管理分词、混合搜索、接入主流大模型做问答。
 
@@ -287,3 +287,77 @@ pnpm install && pnpm dev      # http://localhost:3000
 - 「重新处理」把文件加入下一次同步的重处理名单（即使文件没有变化）；同步进行中提交的请求会在当前任务结束后自动再跑一次。
 - 「排除」把文件或目录的相对路径加入排除规则，下次同步时删除对应内容，原文件不受影响。
 - 原文件下载接口只允许访问知识库来源目录内的文件。
+
+# 第四版：Palantir OSDK 本体与可信推理
+
+新增需求：使用 Palantir [osdk-ts](https://github.com/palantir/osdk-ts) 接入 Foundry 本体（Ontology），进行可信推理和问答。
+
+「可信」在这里有四层含义：**事实有来源**（每个事实引用到具体对象或由 Foundry 计算出的结果），**过程可追溯**（每个来源都保留产生它的 OSDK 调用，可以复现），**结论可核验**（回答后逐条检查陈述与来源是否一致），**写入需人工批准**（助手只能提议动作）。
+
+## 20. 本体连接
+
+```
+浏览器 ──/api/ontology/*──► lib/ontology
+                              ├── store.ts     .data/ontologies.json（600 权限）+ FOUNDRY_* 环境变量
+                              ├── client.ts    createPlatformClient → OntologiesV2.get（API 名称 → RID）
+                              │                createClient(baseUrl, ontologyRid, tokenProvider)
+                              ├── metadata.ts  ObjectTypesV2 / ActionTypesV2 / QueryTypes 列表与详情（缓存 5 分钟）
+                              └── query.ts     对象、链接、聚合、函数、动作
+```
+
+- **SDK**：`@osdk/client`（对象集、聚合、函数、动作）、`@osdk/oauth`（`createConfidentialOauthClient`，client credentials）、`@osdk/foundry.ontologies`（平台 API：本体、对象类型、动作类型、函数列表）。所有调用都在服务端进行，令牌和密钥不会发给浏览器。
+- **不需要生成 SDK**：OSDK 2.x 的定义只是 `{ type: "object", apiName }`，元数据在运行时向 Foundry 加载，所以应用直接用 `client({ type: "object", apiName: "Supplier" })` 这类运行时定义访问任意本体；函数用 `{ type: "query", apiName }`，动作用 `{ type: "action", apiName }`。
+- **认证**：用户 / 服务用户令牌（静态 token provider），或 OAuth 客户端凭证（`createConfidentialOauthClient`，可指定 scopes）。连接测试会先列出凭证可见的本体，便于选择。
+- **会话缓存**：每个连接一个 OSDK 客户端，设置变化（地址、本体、凭证）时重建；失败的会话不缓存。每个请求 45 秒超时。
+- **范围控制**：可限定助手可用的对象类型（白名单），超出范围的类型和链接对助手不可见；可分别开关「运行函数」和「提议动作」（默认只读）。
+- **环境变量连接**：`FOUNDRY_URL` + `FOUNDRY_ONTOLOGY` + 令牌或 OAuth 客户端会生成一个只读的 `foundry` 连接，适合部署时预置。
+
+## 21. 本体工具
+
+问答的 pi agent 在选中本体时增加以下工具（与知识库工具可以同时使用）：
+
+| 工具                      | OSDK 调用                                                                          | 说明                                                                                                            |
+| ------------------------- | ---------------------------------------------------------------------------------- | --------------------------------------------------------------------------------------------------------------- |
+| `ontology_schema`         | `ObjectTypesV2.list` / `getFullMetadata`、`ActionTypesV2.list`、`QueryTypes.list`  | 按关键词查找对象类型；查看某类型的属性 API 名称、类型和链接                                                     |
+| `ontology_find`           | `client(T).where(…).fetchPage({ $orderBy, $select, $pageSize })`                   | where 子句（`$eq` `$in` `$gte` `$containsAllTerms` `$and` …）、全文 `text`、主键列表；返回 totalCount / hasMore |
+| `ontology_links`          | `client(T).where({ pk }).pivotTo(link).fetchPage()`                                | 沿链接取关联对象                                                                                                |
+| `ontology_aggregate`      | `client(T).where(…).aggregate({ $select, $groupBy })`                              | 计数、求和、均值、最值、去重计数，可分组（exact / fixedWidth / ranges / duration）                              |
+| `ontology_function`       | `client({ type: "query", apiName }).executeFunction(params)`                       | 运行 Foundry 函数（业务逻辑），返回对象集时取第一页                                                             |
+| `ontology_propose_action` | `client({ type: "action", apiName }).applyAction(params, { $validateOnly: true })` | 只校验、不执行，见第 23 节                                                                                      |
+
+- **防止静默出错**：where、orderBy、select 中的属性名和运算符都会先对照对象类型元数据检查，拼错的属性会返回错误并列出合法属性，而不是返回空结果；数值型属性的字符串值会转换为数字。
+- **大规模本体**：系统提示只列出前 40 个对象类型，更多的由助手用 `ontology_schema` 按关键词查找；元数据按连接缓存。
+
+## 22. 引用与出处
+
+- **统一编号**：与知识库段落一样，每个对象、每次聚合、每次函数调用都获得对话内稳定的引用编号 `n`（`SourceNumbers`），可以与文档一起被同一句话引用，例如 `[3][7]`。对象的 ref 为 `onto~<连接>~<类型>~<主键>`，同一对象在后续轮次编号不变。
+- **快照**：对象来源保存引用时的属性值（快照）和覆盖的字段列表；聚合保存结果表；函数保存返回值。
+- **出处**：每个来源都保存产生它的 OSDK 调用代码（例如 `client(PurchaseOrder).where({"status":{"$eq":"延误"}}).aggregate({...})`）和取数时间，在工具步骤和来源详情中展示，可以直接复现。
+- **与当前数据比对**：打开引用的对象时，应用重新读取该对象，逐个字段与快照比较，显示「与 Foundry 当前数据一致」或「N 个属性在引用后已变化」，并标出引用时的值。对象详情可以继续沿链接浏览，并跳转到 Foundry Object Explorer。
+
+## 23. 可信推理
+
+**提示词约束**（选中本体时加入）：
+
+- 本体是事实来源；关于对象的属性、关系、数量和总额都必须来自本次对话中的工具结果，并引用编号。
+- 查询陌生的对象类型前先用 `ontology_schema` 获取准确的属性名，不猜属性名和取值。
+- 计数、求和、均值等一律用 `ontology_aggregate` 由 Foundry 计算，不自己累加（除非已看到全部结果）。
+- 关系只能来自 `ontology_links` 的结果；有对应业务逻辑时优先调用 Foundry 函数。
+- 结果不完整（hasMore / truncated）要说明；查询为空时要说明所用的过滤条件。
+- 区分事实与推断：由多个事实推出的结论标注「推断」并说明依据。作答前逐一核对数字。
+- 深度模式：先把子问题映射到对象类型和链接，再取事实、算统计，有文档时与本体数据交叉核对。
+
+**答案核验**（`POST /api/chat/verify`，在回答下方点「核验」）：
+
+1. **拆分陈述**：只取最终回答（最后一次工具调用之后的文本），按句子、列表项、表格行拆分；写在句号后的引用号归到前一句。
+2. **确定性检查**：引用的编号是否存在；陈述中的数字（支持「610.5 万」「42%」、千分位，跳过编号和日期中的数字）能否在所引来源的内容中找到，允许按陈述自身精度四舍五入。知识库来源会重新读取原文段落，而不只用摘要。
+3. **模型判定**：把每条陈述和它所引来源的内容交给当前模型，判定「有依据 / 部分支持 / 无依据 / 非事实陈述」并给出一句理由。
+4. **合并**：引用不存在 → 无依据；模型判部分支持或数字未找到 → 部分支持；没有引用的事实陈述 → 未引用。没有可用模型时只做确定性检查（「引用与数字已核对」）。结果保存在浏览器中，可以重新核验。
+
+## 24. 动作：提议与人工批准
+
+- 助手只能调用 `ontology_propose_action`：服务端用 `$validateOnly` 请 Foundry 校验参数和提交条件，返回校验结果；工具结果明确告诉模型「未执行」。
+- 界面把提议显示为待确认卡片：动作名称、参数、理由（带引用）、Foundry 校验结果。只有校验通过时才能「批准并执行」；也可以拒绝。
+- 批准后浏览器调用 `POST /api/ontology/<id>/actions`（`mode: "apply"`）：服务端再次检查连接是否允许动作，用 `$returnEdits` 执行，并把每次尝试（成功、校验失败、出错）写入 `.data/ontology-audit.jsonl`，在连接详情的「审计日志」中查看。决定结果保存在浏览器中，刷新后仍显示。
+
+**开发与测试**：`scripts/mock-foundry.mjs`（`pnpm mock:foundry`）实现了 OSDK 用到的 Ontology API v2 子集（本体与元数据、loadObjects、aggregate、queryTypes 与 execute、actionTypes 与 apply、OAuth 令牌端点），带一个中日韩数据的供应链本体。应用的连接、浏览、问答、核验、动作审批全流程都在它上面通过了端到端测试；真实 Foundry 环境中的权限、分页规模和对象类型差异需要在接入时再验证。

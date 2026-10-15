@@ -4,6 +4,7 @@ import { runChat } from "@/lib/agent/run";
 import type { ChatMessage } from "@/lib/agent/types";
 import { LlmConfigError, getProvider } from "@/lib/llm";
 import { parseKbId } from "@/lib/meili";
+import { requireOntologyConnection } from "@/lib/ontology/store";
 import type { SearchPrefs } from "@/lib/types";
 
 export const maxDuration = 300;
@@ -13,6 +14,8 @@ type ChatBody = {
   id?: string;
   messages: ChatMessage[];
   kbs?: string[];
+  /** Ontology connection ids. */
+  ontologies?: string[];
   provider?: string;
   model?: string;
   search?: Partial<SearchPrefs>;
@@ -26,7 +29,10 @@ function errorText(error: unknown) {
   return "An error occurred.";
 }
 
-/** RAG chat: a pi agent (search / browse / read tools) streamed as UI messages. */
+/**
+ * Chat: a pi agent with knowledge-base tools (search / browse / read) and
+ * ontology tools (OSDK), streamed as UI messages.
+ */
 export async function POST(request: Request) {
   let body: ChatBody;
   try {
@@ -37,8 +43,11 @@ export async function POST(request: Request) {
 
   try {
     const kbIds = [...new Set((body.kbs ?? []).map((id) => parseKbId(id).id))];
-    if (!kbIds.length) {
-      return new Response("Select at least one knowledge base.", {
+    const ontologies = await Promise.all(
+      [...new Set(body.ontologies ?? [])].map(requireOntologyConnection),
+    );
+    if (!kbIds.length && !ontologies.length) {
+      return new Response("Select at least one knowledge base or ontology.", {
         status: 400,
       });
     }
@@ -53,6 +62,7 @@ export async function POST(request: Request) {
           chatId: body.id || crypto.randomUUID(),
           messages: body.messages ?? [],
           kbIds,
+          ontologies,
           provider,
           modelId,
           prefs: body.search ?? {},

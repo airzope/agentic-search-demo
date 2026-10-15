@@ -14,6 +14,7 @@ import { Toaster } from "@/components/ui/toaster";
 import { api, readStorage, writeStorage } from "@/lib/client";
 import { DICTIONARIES, format, type MessageKey, type UiLang } from "@/lib/i18n";
 import type { ConnectionStatus, KbDetail, KbSummary } from "@/lib/kb/types";
+import type { PublicOntology } from "@/lib/ontology/types";
 import type { SearchPrefs, StatusInfo } from "@/lib/types";
 
 /* ------------------------------------------------------------------ i18n */
@@ -57,6 +58,12 @@ type Workspace = {
   /** Knowledge bases searched by the search and chat pages. */
   scope: string[];
   setScope: (ids: string[]) => void;
+  /** Ontology connections; null while loading. */
+  ontologies: PublicOntology[] | null;
+  /** Ontologies queried by the chat page. */
+  ontologyScope: string[];
+  setOntologyScope: (ids: string[]) => void;
+  refreshOntologies: () => Promise<void>;
   /** Custom (non-Qwen3) embedders available in the scope. */
   embedders: string[];
   /** Whether hybrid / semantic search is possible for the scope. */
@@ -80,6 +87,7 @@ export function useWorkspace() {
 const KB_KEY = "cjk-studio.kb";
 const SCOPE_KEY = "cjk-studio.scope";
 const PREFS_KEY = "cjk-studio.prefs";
+const ONTOLOGY_SCOPE_KEY = "cjk-studio.ontologyScope";
 
 export const kbPath = (id: string) => `/api/kb/${encodeURIComponent(id)}`;
 
@@ -88,7 +96,13 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [kbs, setKbs] = useState<KbSummary[] | null>(null);
   const [connections, setConnections] = useState<ConnectionStatus[]>([]);
   const [preferredKb, setPreferredKb] = useState<string | null>(null);
-  const [preferredScope, setPreferredScope] = useState<string[]>([]);
+  // null: never chosen (then the current KB); [] when the user cleared it.
+  const [preferredScope, setPreferredScope] = useState<string[] | null>(null);
+  const [ontologies, setOntologies] = useState<PublicOntology[] | null>(null);
+  // null: never chosen (then ontologies are used when there is no KB).
+  const [preferredOntologies, setPreferredOntologies] = useState<
+    string[] | null
+  >(null);
   const [detail, setDetail] = useState<KbDetail | null>(null);
   const [prefs, setPrefsState] = useState<SearchPrefs>(DEFAULT_PREFS);
 
@@ -96,7 +110,10 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     // eslint-disable-next-line react-hooks/set-state-in-effect -- one-time restore from localStorage
     setPreferredKb(readStorage<string | null>(KB_KEY, null));
-    setPreferredScope(readStorage<string[]>(SCOPE_KEY, []));
+    setPreferredScope(readStorage<string[] | null>(SCOPE_KEY, null));
+    setPreferredOntologies(
+      readStorage<string[] | null>(ONTOLOGY_SCOPE_KEY, null),
+    );
     setPrefsState({ ...DEFAULT_PREFS, ...readStorage(PREFS_KEY, {}) });
   }, []);
 
@@ -121,12 +138,24 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
     }
   }, []);
 
+  const refreshOntologies = useCallback(async () => {
+    try {
+      const result = await api<{ connections: PublicOntology[] }>(
+        "/api/ontology",
+      );
+      setOntologies(result.connections);
+    } catch {
+      setOntologies([]);
+    }
+  }, []);
+
   useEffect(() => {
     // Async loaders: state is only set after the requests resolve.
     // eslint-disable-next-line react-hooks/set-state-in-effect
     void refreshStatus();
     void refreshKbs();
-  }, [refreshStatus, refreshKbs]);
+    void refreshOntologies();
+  }, [refreshStatus, refreshKbs, refreshOntologies]);
 
   // Keep the list fresh while any knowledge base is syncing or indexing.
   const busy = kbs?.some(
@@ -155,7 +184,8 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
   }, []);
 
   const scope = useMemo(() => {
-    const valid = preferredScope.filter((id) =>
+    if (preferredScope?.length === 0) return [];
+    const valid = (preferredScope ?? []).filter((id) =>
       kbs?.some((kb) => kb.id === id),
     );
     return valid.length ? valid : kbId ? [kbId] : [];
@@ -164,6 +194,19 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
   const setScope = useCallback((ids: string[]) => {
     setPreferredScope(ids);
     writeStorage(SCOPE_KEY, ids);
+  }, []);
+
+  const ontologyScope = useMemo(() => {
+    const ids = (ontologies ?? []).map((item) => item.id);
+    if (preferredOntologies === null) {
+      return kbs && !kbs.length ? ids : [];
+    }
+    return preferredOntologies.filter((id) => ids.includes(id));
+  }, [ontologies, preferredOntologies, kbs]);
+
+  const setOntologyScope = useCallback((ids: string[]) => {
+    setPreferredOntologies(ids);
+    writeStorage(ONTOLOGY_SCOPE_KEY, ids);
   }, []);
 
   const refreshDetail = useCallback(async () => {
@@ -228,6 +271,10 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
       detail: detail?.id === kbId ? detail : null,
       scope,
       setScope,
+      ontologies,
+      ontologyScope,
+      setOntologyScope,
+      refreshOntologies,
       embedders,
       semanticAvailable,
       prefs: effectivePrefs,
@@ -245,6 +292,10 @@ function WorkspaceProvider({ children }: { children: ReactNode }) {
       detail,
       scope,
       setScope,
+      ontologies,
+      ontologyScope,
+      setOntologyScope,
+      refreshOntologies,
       embedders,
       semanticAvailable,
       effectivePrefs,

@@ -6,11 +6,17 @@ import type { UIMessageStreamWriter } from "ai";
 
 import { toAgentMessages } from "@/lib/agent/history";
 import { createPiModel } from "@/lib/agent/model";
+import {
+  ONTOLOGY_RULES,
+  createOntologyTools,
+  ontologyCatalog,
+} from "@/lib/agent/ontology-tools";
 import { SourceNumbers, createRagTools } from "@/lib/agent/tools";
 import { collectSources, type ChatMessage } from "@/lib/agent/types";
 import { singleton } from "@/lib/global";
 import { browseTree } from "@/lib/kb/browse";
 import { describeKb } from "@/lib/kb/catalog";
+import type { OntologyConnection } from "@/lib/ontology/store";
 import type { ResolvedProvider } from "@/lib/settings";
 import type { ChatMetadata, SearchPrefs } from "@/lib/types";
 
@@ -63,11 +69,13 @@ const BASE_RULES = `Rules:
 - Ground every answer in retrieved content. After each factual statement, cite the source numbers \`n\` from tool results in square brackets, e.g. 退款需在 14 天内申请[3]。
 - When several sources support or add to a statement, cite all of them together: [2][5]. Prefer drawing on several sources over relying on a single one, and point out where they agree or differ.
 - Only use numbers that appear in tool results. Never invent numbers, refs or sources, and do not write a separate reference list (the interface shows the sources).
+- If the sources do not contain the answer, say so plainly instead of guessing.
+- Reply in the same language as the user's latest message.`;
+
+const KB_RULES = `Knowledge base rules:
 - For Chinese, Japanese or Korean, prefer short key terms (2-6 characters) and try synonyms, abbreviations and full names as separate queries.
 - When the question targets a specific area, restrict search with "kbs" or "branch" (a folder path from browse or result paths).
-- Snippets are excerpts. When details matter (tables, steps, numbers, conditions), call read on the most relevant refs.
-- If the knowledge bases do not contain the answer, say so plainly instead of guessing.
-- Reply in the same language as the user's latest message.`;
+- Snippets are excerpts. When details matter (tables, steps, numbers, conditions), call read on the most relevant refs.`;
 
 const DEEP_RULES = `Deep research mode — the question may be complex:
 1. Plan: first write a short list of the sub-questions you must answer.
@@ -76,10 +84,13 @@ const DEEP_RULES = `Deep research mode — the question may be complex:
 4. Check gaps and conflicts: search again for anything still missing, with different wording.
 5. Answer with a structured synthesis (headings, bullets, or a table when comparing), citing every source you rely on. Point out conflicting sources and remaining uncertainty.`;
 
+const DEEP_ONTOLOGY = `With an ontology: map each sub-question to object types and links (ontology_schema), get the facts with ontology_find / ontology_links, compute every statistic with ontology_aggregate, and cross-check documents against ontology data where both exist.`;
+
 export type RunOptions = {
   chatId: string;
   messages: ChatMessage[];
   kbIds: string[];
+  ontologies: OntologyConnection[];
   provider: ResolvedProvider;
   modelId: string;
   prefs: Partial<SearchPrefs>;
@@ -114,16 +125,41 @@ export async function runChat(options: RunOptions) {
 
   const history = messages.slice(0, -1);
   const numbers = new SourceNumbers(collectSources(history).values());
+  const hasKbs = options.kbIds.length > 0;
+  const hasOntologies = options.ontologies.length > 0;
+  const [kbCatalog, ontologies] = await Promise.all([
+    hasKbs ? catalog(options.kbIds) : "",
+    hasOntologies ? ontologyCatalog(options.ontologies) : "",
+  ]);
   const instructions = [
-    "You are a research assistant answering questions from the user's knowledge bases.",
-    "",
-    "Selected knowledge bases (id — name — size — structure):",
-    await catalog(options.kbIds),
-    "",
-    "Tools: search (several queries at once), browse (folders and files), read (full text or context around a hit).",
+    hasOntologies
+      ? "You are a research assistant answering questions from the user's knowledge bases and Palantir Foundry ontologies, with verifiable, cited reasoning."
+      : "You are a research assistant answering questions from the user's knowledge bases.",
+    ...(hasKbs
+      ? [
+          "",
+          "Selected knowledge bases (id — name — size — structure):",
+          kbCatalog,
+          "",
+          "Knowledge base tools: search (several queries at once), browse (folders and files), read (full text or context around a hit).",
+        ]
+      : []),
+    ...(hasOntologies
+      ? [
+          "",
+          "Selected ontologies (id — name — object types):",
+          ontologies,
+          "",
+          "Ontology tools: ontology_schema, ontology_find, ontology_links, ontology_aggregate, plus ontology_function / ontology_propose_action when enabled.",
+        ]
+      : []),
     "",
     BASE_RULES,
-    ...(deep ? ["", DEEP_RULES] : []),
+    ...(hasKbs ? ["", KB_RULES] : []),
+    ...(hasOntologies ? ["", ONTOLOGY_RULES] : []),
+    ...(deep
+      ? ["", DEEP_RULES, ...(hasOntologies ? [DEEP_ONTOLOGY] : [])]
+      : []),
   ].join("\n");
 
   const maxTurns = deep ? 16 : 7;
@@ -133,11 +169,18 @@ export async function runChat(options: RunOptions) {
       systemPrompt: instructions,
       model,
       thinkingLevel: model.reasoning ? (deep ? "medium" : "low") : "off",
-      tools: createRagTools({
-        kbIds: options.kbIds,
-        prefs: options.prefs,
-        numbers,
-      }),
+      tools: [
+        ...(hasKbs
+          ? createRagTools({
+              kbIds: options.kbIds,
+              prefs: options.prefs,
+              numbers,
+            })
+          : []),
+        ...(hasOntologies
+          ? createOntologyTools({ connections: options.ontologies, numbers })
+          : []),
+      ],
       messages: toAgentMessages(history, model),
     },
     streamFn,

@@ -40,6 +40,7 @@ export class SourceNumbers {
 const toSource = (hit: KbHit, n: number): Source => ({
   n,
   ref: hit.ref,
+  kind: "doc",
   kb: hit.kbName,
   title: stripHighlights(hit.titleHighlighted || hit.title),
   path: hit.path ?? undefined,
@@ -215,6 +216,7 @@ export function createRagTools({
       const output: ReadToolOutput = {
         n: numbers.number(ref),
         ref,
+        kind: "doc",
         kb: document.kbName,
         title: document.title,
         path: document.path ?? undefined,

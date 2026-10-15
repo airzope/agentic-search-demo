@@ -33,6 +33,53 @@ type ToolPart = Extract<Part, { toolCallId: string }>;
 const isToolPart = (part: Part): part is ToolPart =>
   part.type.startsWith("tool-") && "toolCallId" in part;
 
+type ResultSource = {
+  n?: number;
+  primaryKey?: unknown;
+  title?: string;
+  properties?: unknown;
+  table?: { columns: string[]; rows: unknown[][] };
+  value?: unknown;
+  query?: string;
+};
+
+/**
+ * Ontology results as the model first saw them: the UI copy also carries
+ * links, snippets and timestamps that would only fill the context.
+ */
+function modelView(name: string, output: unknown) {
+  const value = (output ?? {}) as Record<string, unknown>;
+  if (name === "ontology_find" || name === "ontology_links") {
+    return {
+      objectType: value.objectType,
+      query: value.query,
+      totalCount: value.totalCount,
+      hasMore: value.hasMore,
+      via: value.via,
+      objects: ((value.objects ?? []) as ResultSource[]).map((object) => ({
+        n: object.n,
+        primaryKey: object.primaryKey,
+        title: object.title,
+        properties: object.properties,
+      })),
+    };
+  }
+  if (name === "ontology_aggregate") {
+    const source = value as ResultSource;
+    return {
+      n: source.n,
+      query: source.query,
+      columns: source.table?.columns,
+      rows: source.table?.rows,
+    };
+  }
+  if (name === "ontology_function") {
+    const source = value as ResultSource;
+    return { n: source.n, title: source.title, value: source.value };
+  }
+  return output ?? null;
+}
+
 const textOf = (message: ChatMessage) =>
   message.parts
     .filter(
@@ -122,7 +169,7 @@ export function toAgentMessages(
         let text =
           part.state === "output-error"
             ? `Error: ${part.errorText ?? "failed"}`
-            : JSON.stringify(part.output ?? null);
+            : JSON.stringify(modelView(name, part.output));
         if (!last && text.length > OLD_RESULT_CHARS) {
           text = `${text.slice(0, OLD_RESULT_CHARS)}…`;
         }

@@ -11,6 +11,7 @@ import {
   SparklesIcon,
   SunIcon,
   TextSearchIcon,
+  WaypointsIcon,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
@@ -29,6 +30,7 @@ const NAV: { href: string; label: MessageKey; icon: LucideIcon }[] = [
   { href: "/", label: "nav.chat", icon: MessageSquareTextIcon },
   { href: "/search", label: "nav.search", icon: SearchIcon },
   { href: "/kb", label: "nav.indexes", icon: DatabaseIcon },
+  { href: "/ontology", label: "nav.ontology", icon: WaypointsIcon },
   { href: "/tokenization", label: "nav.tokenization", icon: ScissorsIcon },
   { href: "/embedders", label: "nav.embedders", icon: SparklesIcon },
   { href: "/settings", label: "nav.settings", icon: SettingsIcon },
