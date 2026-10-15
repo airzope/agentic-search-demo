@@ -16,9 +16,9 @@ const fontMono = Geist_Mono({
 });
 
 export const metadata: Metadata = {
-  title: "CJK 搜索工作台 · CJK Search Studio",
+  title: "通用问答客户端 · General Q&A Client",
   description:
-    "Local-first search workbench for Chinese, Japanese and Korean: tokenization management, hybrid search and LLM chat on Meilisearch.",
+    "A local-first Q&A client over knowledge bases (Meilisearch) and Palantir Foundry ontologies, with numbered citations, answer verification and CJK support.",
 };
 
 export default async function RootLayout({ children }: LayoutProps<"/">) {

@@ -25,3 +25,18 @@ export type ChatMetadata = {
   usage?: { input: number; output: number };
   durationMs?: number;
 };
+
+/** Settings → About: app, runtime, search engine and library versions. */
+export type AboutInfo = {
+  version: string | null;
+  runtime: { node: string; platform: string };
+  meilisearch: {
+    id: string;
+    name: string;
+    host: string;
+    ok: boolean;
+    version?: string;
+    error?: string;
+  }[];
+  components: { name: string; version: string | null }[];
+};

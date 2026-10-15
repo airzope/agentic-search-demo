@@ -10,20 +10,19 @@ import {
   SettingsIcon,
   SparklesIcon,
   SunIcon,
-  TextSearchIcon,
+  MessageCircleQuestionMarkIcon,
   WaypointsIcon,
   type LucideIcon,
 } from "lucide-react";
 import Link from "next/link";
 import { usePathname } from "next/navigation";
-import { useEffect, useState, type ReactNode } from "react";
+import type { ReactNode } from "react";
 
-import { useI18n, useWorkspace } from "@/components/app-providers";
+import { useI18n, useTheme, useWorkspace } from "@/components/app-providers";
 import { NativeSelect } from "@/components/ui/native-select";
 import { Segmented } from "@/components/ui/segmented";
-import { readStorage, writeStorage } from "@/lib/client";
 import type { MessageKey } from "@/lib/i18n";
-import { THEME_KEY, type Theme } from "@/lib/theme";
+import type { Theme } from "@/lib/theme";
 import { cn } from "@/lib/utils";
 
 const NAV: { href: string; label: MessageKey; icon: LucideIcon }[] = [
@@ -35,28 +34,6 @@ const NAV: { href: string; label: MessageKey; icon: LucideIcon }[] = [
   { href: "/embedders", label: "nav.embedders", icon: SparklesIcon },
   { href: "/settings", label: "nav.settings", icon: SettingsIcon },
 ];
-
-export function applyTheme(theme: Theme) {
-  const dark =
-    theme === "dark" ||
-    (theme === "system" &&
-      window.matchMedia("(prefers-color-scheme: dark)").matches);
-  document.documentElement.classList.toggle("dark", dark);
-}
-
-export function useTheme() {
-  const [theme, setThemeState] = useState<Theme>("system");
-  useEffect(() => {
-    // eslint-disable-next-line react-hooks/set-state-in-effect -- restore from localStorage after mount
-    setThemeState(readStorage<Theme>(THEME_KEY, "system"));
-  }, []);
-  const setTheme = (next: Theme) => {
-    setThemeState(next);
-    writeStorage(THEME_KEY, next);
-    applyTheme(next);
-  };
-  return { theme, setTheme };
-}
 
 function IndexPicker({ className }: { className?: string }) {
   const { t } = useI18n();
@@ -97,13 +74,14 @@ function IndexPicker({ className }: { className?: string }) {
   );
 }
 
+/** Search engine status; versions are listed under Settings → About. */
 function StatusDot() {
   const { t } = useI18n();
   const { status } = useWorkspace();
   const ok = status?.meilisearch.ok;
   return (
     <Link
-      href="/settings"
+      href="/settings#about"
       className="text-muted-foreground hover:text-foreground flex min-w-0 items-center gap-2 text-xs"
       title={status?.meilisearch.host}
     >
@@ -118,12 +96,9 @@ function StatusDot() {
         )}
       />
       <span className="truncate">
-        {status?.meilisearch.ok
-          ? t("status.connected", { version: status.meilisearch.version })
-          : status
-            ? t("status.offline")
-            : "…"}
+        {status ? (ok ? t("status.ok") : t("status.offline")) : "…"}
       </span>
+      <span className="ml-auto shrink-0">{t("about.title")}</span>
     </Link>
   );
 }
@@ -134,11 +109,54 @@ const THEME_ICONS: Record<Theme, LucideIcon> = {
   dark: MoonIcon,
 };
 
+const THEME_ORDER: Theme[] = ["system", "light", "dark"];
+
+/** Theme as three icon buttons: follow the system, light, dark. */
+function ThemeSwitch() {
+  const { t } = useI18n();
+  const { theme, setTheme } = useTheme();
+  return (
+    <Segmented
+      size="sm"
+      aria-label={t("settings.theme")}
+      value={theme}
+      onChange={setTheme}
+      options={THEME_ORDER.map((value) => {
+        const Icon = THEME_ICONS[value];
+        return {
+          value,
+          label: <Icon />,
+          title: t(`theme.${value}`),
+        };
+      })}
+    />
+  );
+}
+
+/** One button cycling the theme, for the compact mobile header. */
+function ThemeButton() {
+  const { t } = useI18n();
+  const { theme, setTheme } = useTheme();
+  const Icon = THEME_ICONS[theme];
+  return (
+    <button
+      type="button"
+      className="text-muted-foreground hover:text-foreground hover:bg-muted shrink-0 rounded-md p-1.5"
+      aria-label={`${t("settings.theme")}: ${t(`theme.${theme}`)}`}
+      title={t(`theme.${theme}`)}
+      onClick={() =>
+        setTheme(
+          THEME_ORDER[(THEME_ORDER.indexOf(theme) + 1) % THEME_ORDER.length],
+        )
+      }
+    >
+      <Icon className="size-4" />
+    </button>
+  );
+}
+
 function PreferenceToggles() {
   const { lang, setLang, t } = useI18n();
-  const { theme, setTheme } = useTheme();
-  const order: Theme[] = ["system", "light", "dark"];
-  const ThemeIcon = THEME_ICONS[theme];
   return (
     <div className="flex items-center justify-between gap-2">
       <Segmented
@@ -151,17 +169,7 @@ function PreferenceToggles() {
           { value: "en", label: "EN" },
         ]}
       />
-      <button
-        type="button"
-        className="text-muted-foreground hover:text-foreground hover:bg-muted rounded-md p-1.5"
-        aria-label={`${t("settings.theme")}: ${t(`theme.${theme}`)}`}
-        title={t(`theme.${theme}`)}
-        onClick={() =>
-          setTheme(order[(order.indexOf(theme) + 1) % order.length])
-        }
-      >
-        <ThemeIcon className="size-4" />
-      </button>
+      <ThemeSwitch />
     </div>
   );
 }
@@ -171,7 +179,7 @@ function Brand() {
   return (
     <Link href="/" className="flex min-w-0 items-center gap-2">
       <span className="bg-primary text-primary-foreground flex size-7 shrink-0 items-center justify-center rounded-lg">
-        <TextSearchIcon className="size-4" />
+        <MessageCircleQuestionMarkIcon className="size-4" />
       </span>
       <span className="truncate text-sm font-semibold tracking-tight">
         {t("app.name")}
@@ -221,7 +229,8 @@ export function AppShell({ children }: { children: ReactNode }) {
         <header className="bg-background flex shrink-0 flex-col gap-2 border-b px-3 pt-2.5 pb-2 md:hidden">
           <div className="flex items-center gap-2">
             <Brand />
-            <IndexPicker className="ml-auto w-40" />
+            <IndexPicker className="ml-auto w-36" />
+            <ThemeButton />
           </div>
           <nav
             className="-mx-1 flex gap-1 overflow-x-auto px-1"

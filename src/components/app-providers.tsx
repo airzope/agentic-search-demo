@@ -13,6 +13,7 @@ import {
 import { Toaster } from "@/components/ui/toaster";
 import { api, readStorage, writeStorage } from "@/lib/client";
 import { DICTIONARIES, format, type MessageKey, type UiLang } from "@/lib/i18n";
+import { THEME_KEY, type Theme } from "@/lib/theme";
 import type { ConnectionStatus, KbDetail, KbSummary } from "@/lib/kb/types";
 import type { PublicOntology } from "@/lib/ontology/types";
 import type { SearchPrefs, StatusInfo } from "@/lib/types";
@@ -34,6 +35,60 @@ export function useI18n() {
   const context = useContext(I18nContext);
   if (!context) throw new Error("useI18n must be used inside AppProviders");
   return context;
+}
+
+/* ----------------------------------------------------------------- theme */
+
+type ThemeState = { theme: Theme; setTheme: (theme: Theme) => void };
+
+const ThemeContext = createContext<ThemeState | null>(null);
+
+export function useTheme() {
+  const context = useContext(ThemeContext);
+  if (!context) throw new Error("useTheme must be used inside AppProviders");
+  return context;
+}
+
+const prefersDark = () =>
+  window.matchMedia("(prefers-color-scheme: dark)").matches;
+
+function applyTheme(theme: Theme) {
+  const dark = theme === "dark" || (theme === "system" && prefersDark());
+  document.documentElement.classList.toggle("dark", dark);
+}
+
+/** Light, dark or follow the system; the class is set before paint (layout). */
+function ThemeProvider({ children }: { children: ReactNode }) {
+  const [theme, setThemeState] = useState<Theme>("system");
+
+  useEffect(() => {
+    // eslint-disable-next-line react-hooks/set-state-in-effect -- restore from localStorage after mount
+    setThemeState(readStorage<Theme>(THEME_KEY, "system"));
+  }, []);
+
+  // Follow the system setting while "system" is selected.
+  useEffect(() => {
+    if (theme !== "system") return;
+    const query = window.matchMedia("(prefers-color-scheme: dark)");
+    const update = () => applyTheme("system");
+    query.addEventListener("change", update);
+    return () => query.removeEventListener("change", update);
+  }, [theme]);
+
+  const value = useMemo<ThemeState>(
+    () => ({
+      theme,
+      setTheme: (next) => {
+        setThemeState(next);
+        writeStorage(THEME_KEY, next);
+        applyTheme(next);
+      },
+    }),
+    [theme],
+  );
+  return (
+    <ThemeContext.Provider value={value}>{children}</ThemeContext.Provider>
+  );
 }
 
 /* ------------------------------------------------------------- workspace */
@@ -341,9 +396,11 @@ export function AppProviders({
 
   return (
     <I18nContext.Provider value={i18n}>
-      <WorkspaceProvider>
-        <Toaster>{children}</Toaster>
-      </WorkspaceProvider>
+      <ThemeProvider>
+        <WorkspaceProvider>
+          <Toaster>{children}</Toaster>
+        </WorkspaceProvider>
+      </ThemeProvider>
     </I18nContext.Provider>
   );
 }

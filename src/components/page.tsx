@@ -140,12 +140,14 @@ export function RequireIndex({ children }: { children: ReactNode }) {
 
 /** A titled section inside a page. */
 export function Section({
+  id,
   title,
   description,
   actions,
   className,
   children,
 }: {
+  id?: string;
   title: ReactNode;
   description?: ReactNode;
   actions?: ReactNode;
@@ -154,7 +156,9 @@ export function Section({
 }) {
   return (
     <section
+      id={id}
       className={cn(
+        "scroll-mt-4",
         "bg-card ring-foreground/10 flex min-w-0 flex-col gap-4 rounded-xl p-4 ring-1",
         className,
       )}

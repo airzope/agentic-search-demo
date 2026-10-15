@@ -12,10 +12,16 @@ import {
   StarIcon,
   Trash2Icon,
 } from "lucide-react";
-import { useCallback, useEffect, useId, useMemo, useState } from "react";
+import {
+  useCallback,
+  useEffect,
+  useId,
+  useMemo,
+  useState,
+  type ReactNode,
+} from "react";
 
-import { useI18n, useWorkspace } from "@/components/app-providers";
-import { useTheme } from "@/components/app-shell";
+import { useI18n, useTheme, useWorkspace } from "@/components/app-providers";
 import { CheckField } from "@/components/kb-form";
 import { Page, Section } from "@/components/page";
 import { Badge } from "@/components/ui/badge";
@@ -47,6 +53,7 @@ import {
   type OcrSource,
 } from "@/lib/ocr/catalog";
 import type { Theme } from "@/lib/theme";
+import type { AboutInfo } from "@/lib/types";
 import { cn } from "@/lib/utils";
 
 async function saveSettings(patch: SettingsPatch) {
@@ -1341,6 +1348,101 @@ function Appearance() {
   );
 }
 
+function About() {
+  const { t } = useI18n();
+  const [about, setAbout] = useState<AboutInfo | null>(null);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    api<AboutInfo>("/api/about")
+      .then(setAbout)
+      .catch((reason) => setError(errorMessage(reason)));
+  }, []);
+
+  // Scroll here when opened from the sidebar status (#about).
+  useEffect(() => {
+    if (about && window.location.hash === "#about") {
+      document.getElementById("about")?.scrollIntoView({ block: "start" });
+    }
+  }, [about]);
+
+  const row = (label: ReactNode, value: ReactNode, key?: string) => (
+    <div
+      key={key}
+      className="flex items-baseline justify-between gap-3 border-b py-1.5 text-sm last:border-b-0"
+    >
+      <span className="text-muted-foreground min-w-0 truncate">{label}</span>
+      <span className="shrink-0 text-right font-mono text-xs">{value}</span>
+    </div>
+  );
+
+  return (
+    <Section
+      id="about"
+      title={t("about.title")}
+      description={t("about.desc")}
+      actions={
+        about?.version ? (
+          <Badge variant="outline">
+            {t("app.name")} · {t("about.version", { version: about.version })}
+          </Badge>
+        ) : null
+      }
+    >
+      {error ? <p className="text-destructive text-sm">{error}</p> : null}
+      {!about && !error ? (
+        <p className="text-muted-foreground flex items-center gap-2 text-sm">
+          <Spinner /> {t("common.loading")}
+        </p>
+      ) : null}
+      {about ? (
+        <div className="grid gap-6 md:grid-cols-2">
+          <div className="flex flex-col gap-4">
+            <div className="flex flex-col">
+              <p className="mb-1 text-xs font-medium">{t("about.engines")}</p>
+              {about.meilisearch.map((engine) =>
+                row(
+                  <span title={engine.host}>
+                    {engine.name}{" "}
+                    <span className="text-muted-foreground/70 font-mono text-[11px]">
+                      {engine.host}
+                    </span>
+                  </span>,
+                  engine.ok ? (
+                    <span className="inline-flex items-center gap-1 text-emerald-700 dark:text-emerald-400">
+                      <CheckIcon className="size-3" />v{engine.version}
+                    </span>
+                  ) : (
+                    <span className="text-destructive" title={engine.error}>
+                      {t("about.offline")}
+                    </span>
+                  ),
+                  engine.id,
+                ),
+              )}
+            </div>
+            <div className="flex flex-col">
+              <p className="mb-1 text-xs font-medium">{t("about.runtime")}</p>
+              {row("Node.js", about.runtime.node)}
+              {row(t("about.platform"), about.runtime.platform)}
+            </div>
+          </div>
+          <div className="flex flex-col">
+            <p className="mb-1 text-xs font-medium">{t("about.components")}</p>
+            {about.components.map((component) =>
+              row(
+                component.name,
+                component.version ? `v${component.version}` : "—",
+                component.name,
+              ),
+            )}
+          </div>
+        </div>
+      ) : null}
+    </Section>
+  );
+}
+
 export function SettingsView() {
   const { t } = useI18n();
   const [settings, setSettings] = useState<PublicSettings | null>(null);
@@ -1372,6 +1474,7 @@ export function SettingsView() {
           />
           <OcrSettings settings={settings.ocr} onSaved={setSettings} />
           <Appearance />
+          <About />
         </>
       ) : !error ? (
         <div className="text-muted-foreground flex items-center gap-2 text-sm">

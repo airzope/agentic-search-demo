@@ -1,6 +1,6 @@
 /** UI strings. Chinese is the source of truth; English must cover every key. */
 export const zh = {
-  "app.name": "CJK 搜索工作台",
+  "app.name": "通用问答客户端",
   "nav.chat": "问答",
   "nav.search": "搜索",
   "nav.tokenization": "分词",
@@ -10,8 +10,16 @@ export const zh = {
   "index.current": "当前知识库",
   "index.none": "暂无知识库",
   "index.docs": "{count} 篇",
-  "status.connected": "Meilisearch {version}",
   "status.offline": "Meilisearch 未连接",
+  "status.ok": "检索服务正常",
+  "about.title": "关于",
+  "about.desc": "版本与运行环境。",
+  "about.version": "版本 {version}",
+  "about.engines": "Meilisearch 实例",
+  "about.runtime": "运行环境",
+  "about.components": "主要组件",
+  "about.offline": "未连接",
+  "about.platform": "平台",
 
   "common.save": "保存",
   "common.saving": "保存中…",
@@ -645,7 +653,7 @@ export const zh = {
 export type MessageKey = keyof typeof zh;
 
 export const en: Record<MessageKey, string> = {
-  "app.name": "CJK Search Studio",
+  "app.name": "General Q&A Client",
   "nav.chat": "Chat",
   "nav.search": "Search",
   "nav.tokenization": "Tokenization",
@@ -655,8 +663,16 @@ export const en: Record<MessageKey, string> = {
   "index.current": "Current knowledge base",
   "index.none": "No knowledge base",
   "index.docs": "{count} docs",
-  "status.connected": "Meilisearch {version}",
   "status.offline": "Meilisearch offline",
+  "status.ok": "Search engine online",
+  "about.title": "About",
+  "about.desc": "Versions and runtime.",
+  "about.version": "Version {version}",
+  "about.engines": "Meilisearch instances",
+  "about.runtime": "Runtime",
+  "about.components": "Main components",
+  "about.offline": "offline",
+  "about.platform": "Platform",
 
   "common.save": "Save",
   "common.saving": "Saving…",

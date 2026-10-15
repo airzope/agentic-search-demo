@@ -1,6 +1,10 @@
-# CJK 搜索工作台 · CJK Search Studio
+# 通用问答客户端 · General Q&A Client
 
-一个可本地运行、对中日韩（CJK）友好的知识库搜索与问答工作台，基于 [Meilisearch](https://www.meilisearch.com/)、[pi agent](https://github.com/earendil-works/pi)、[Palantir OSDK](https://github.com/palantir/osdk-ts) 与 [Vercel AI SDK](https://ai-sdk.dev/)：
+一个可本地运行的通用问答客户端：把本地目录、云端知识库和 Palantir Foundry 本体接到同一个问答助手上，回答逐句标注来源编号，可以追溯、可以逐条核验；对中日韩（CJK）文本友好。基于 [Meilisearch](https://www.meilisearch.com/)、[pi agent](https://github.com/earendil-works/pi)、[Palantir OSDK](https://github.com/palantir/osdk-ts) 与 [Vercel AI SDK](https://ai-sdk.dev/)。
+
+![问答：制度文档与本体数据联合推理](docs/screenshots/chat-policy.png)
+
+主要功能：
 
 - **本地目录即知识库**：把任意文件夹映射为知识库，增量同步（按大小与修改时间比对），可监听目录变化自动同步；也可以在浏览器里上传文件或整个文件夹。
 - **文档转换与内置 OCR**：Office（docx/xlsx/pptx）、PDF、EPUB、HTML、Markdown、文本、代码等由 [anydoc](https://github.com/firecrawl/anydoc) 转为 Markdown；图片、扫描版 PDF（只识别需要的页面）和多页 TIFF 由**内置的 [PaddleOCR](https://github.com/PaddlePaddle/PaddleOCR)**（PP-OCRv6，ONNX Runtime 进程内运行，无需 Docker 或 Python）识别，模型首次使用时自动下载。GBK / Big5 / Shift_JIS / EUC-KR 编码的文本会自动识别。
@@ -13,8 +17,73 @@
 - **分词管理**：可视化编辑自定义词典、同义词、停用词、分隔符与字段语言，并提供**由引擎实测的分词预览**。
 - **主流 LLM 接入**：OpenAI、Anthropic Claude、Google Gemini、OpenRouter、DeepSeek、通义千问、Kimi、智谱 GLM、豆包、硅基流动、Ollama，以及任意 OpenAI 兼容接口。
 - **CJK 体验**：中英双语界面；按内容自动选择中、日、韩字体；输入法组字时按 Enter 不会误发送或误搜索。
+- **浅色 / 深色主题**：可跟随系统，也可在侧栏底部或「设置 → 外观」中切换；手机上在顶栏切换。各组件版本（含 Meilisearch）在「设置 → 关于」中查看。
 
 设计说明见 [docs/DESIGN.md](docs/DESIGN.md)。
+
+## 典型问答案例
+
+> 以下截图使用本仓库的演示数据生成：两个映射本地目录的知识库，以及 `pnpm mock:foundry` 提供的模拟供应链本体。回答由测试用的模拟模型（OpenAI 兼容接口，界面上显示为 `mock-model`）按脚本生成，用于展示界面与交互；接入真实模型后，检索、引用、核验和审批的流程相同。
+
+### 1. 知识库问答：一句话引用多个来源
+
+问「节点或整个区域出故障时，数据会丢吗？多久能恢复？」——助手把问题拆成几个方面并行检索，精读《故障处理手册》，用表格汇总，每格都标出来源；点击编号可查看原文片段，再点「打开原文」定位到该段。
+
+![知识库多来源引用](docs/screenshots/chat-kb.png)
+
+### 2. 本体问答：统计由 Foundry 计算，事实引用到对象
+
+问「哪个供应商的风险最高？为什么？」——助手先让 Foundry 按供应商聚合延误订单（展开可看到结果表和对应的 OSDK 调用），再并行读取供应商对象、沿链接取质量事件、运行风险评分函数。每个对象、统计和函数结果都有编号。
+
+![本体问答](docs/screenshots/chat-ontology.png)
+
+点「核验」后逐句检查：引用是否存在、句中的数字能否在所引来源中找到，再由模型判断是否有依据。下图中「其中 2 起为高严重度」是模型自己数出来的，来源里没有这个数，因此被标为「部分支持」；没有引用的推断被标为「未引用」。
+
+![答案核验](docs/screenshots/chat-verify.png)
+
+### 3. 制度文档 + 本体数据：按规则给出处理建议
+
+同时选中「采购制度库」和「供应链本体」，问「按照公司制度，宁波海天模具现在应该怎么处理？」——助手检索制度条款，从本体读取供应商评级，并让 Foundry 计算高严重度事件数和延误金额，把每条措施同时对应到制度原文和数据（见本页顶部的截图）。
+
+### 4. 动作提议、人工批准与数据比对
+
+说「把金额最大的延误订单升级为高优先级」——助手只能**提议**动作：Foundry 先校验参数，你在卡片上批准后才执行，并写入审计日志。执行后再打开回答里引用的订单，会提示哪些属性在引用后发生了变化，并列出引用时的值。
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/chat-action.png" alt="动作提议与批准"></td>
+<td width="50%"><img src="docs/screenshots/object-changed.png" alt="引用对象与当前数据比对"></td>
+</tr>
+</table>
+
+## 页面一览
+
+<table>
+<tr>
+<td width="50%"><img src="docs/screenshots/search.png" alt="搜索"><br><b>搜索</b>：关键词 / 混合 / 语义检索，多知识库联合、按目录分支和文件类型筛选，命中词高亮。</td>
+<td width="50%"><img src="docs/screenshots/kb-list.png" alt="知识库"><br><b>知识库</b>：映射本地目录或上传文件，显示块数、向量、同步时间和失败文件；一键导入中日韩示例数据。</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/kb-files.png" alt="文件管理"><br><b>文件管理</b>：每个文件的处理状态、块数与大小；可查看转换结果、打开原文件、重新处理、排除。图片和扫描件由内置 PaddleOCR 识别。</td>
+<td><img src="docs/screenshots/ontology.png" alt="本体"><br><b>本体</b>：浏览 Foundry 本体的对象类型、属性、链接和对象，查看函数与动作，设置助手可用的对象类型，查看动作审计日志。</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/tokenization.png" alt="分词"><br><b>分词</b>：编辑词典、同义词、停用词、分隔符和字段语言，右侧是由引擎实测的分词预览。</td>
+<td><img src="docs/screenshots/embedders.png" alt="向量"><br><b>向量</b>：查看和配置索引的向量模型（内置 Qwen3-Embedding 或 Meilisearch embedder）。</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/settings.png" alt="设置"><br><b>设置</b>：Meilisearch 实例、12 家大模型服务、向量引擎、PaddleOCR、外观。</td>
+<td><img src="docs/screenshots/settings-about.png" alt="关于"><br><b>关于</b>：应用、Meilisearch 实例与主要组件的版本，以及运行环境。</td>
+</tr>
+<tr>
+<td><img src="docs/screenshots/dark-chat.png" alt="深色主题：问答"><br><b>深色主题</b>：问答页。</td>
+<td><img src="docs/screenshots/dark-ontology.png" alt="深色主题：本体"><br><b>深色主题</b>：本体浏览。</td>
+</tr>
+</table>
+
+手机上同样可用（下图为 390 像素宽度）：
+
+<img src="docs/screenshots/mobile-chat.png" alt="手机界面" width="320">
 
 ## 快速开始
 
@@ -116,7 +185,7 @@ docker-compose.yml          Meilisearch，以及可选的 Ollama
 
 ## English
 
-A local-first knowledge-base search and Q&A workbench for Chinese, Japanese and Korean, built on Meilisearch, the pi agent, the Palantir OSDK and the Vercel AI SDK:
+**General Q&A Client** — a local-first Q&A client that puts local folders, cloud knowledge bases and Palantir Foundry ontologies behind one assistant, with numbered citations on every claim, claim-by-claim verification, and CJK-friendly text handling. Built on Meilisearch, the pi agent, the Palantir OSDK and the Vercel AI SDK. Screenshots of every page and of typical Q&A cases are above (the answers in them come from a scripted mock model and the mock ontology, to show the interface):
 
 - **Folders as knowledge bases**: map any local directory (incremental sync, optional file watching) or upload files and folders in the browser.
 - **Conversion and built-in OCR**: Office, PDF, EPUB, HTML, Markdown, text and code are converted with anydoc; images, scanned PDF pages and multi-page TIFFs are recognized by PaddleOCR (PP-OCRv6) running in-process on ONNX Runtime, with no Docker or Python. Models download on first use (Hugging Face, ModelScope, hf-mirror or PyPI). Legacy CJK encodings are detected.
@@ -126,6 +195,6 @@ A local-first knowledge-base search and Q&A workbench for Chinese, Japanese and 
 - **pi agent Q&A with multiple citations**: a pi agent (`@earendil-works/pi-agent-core` + `pi-ai`, covering all 12 configured LLM vendors) searches with several queries, browses folders and reads documents; deep mode plans sub-questions first. Sources get conversation-wide numbers, so one claim can cite several sources ([2][5]); each answer lists its sources. You can steer a running answer with follow-up guidance, and conversations are kept in the browser.
 - **Palantir Foundry ontologies with verifiable answers**: connect one or more ontologies through [osdk-ts](https://github.com/palantir/osdk-ts) (`@osdk/client`, `@osdk/oauth`; token or OAuth client credentials, no generated SDK needed). The assistant queries objects, follows links, lets Foundry compute aggregations and run functions; every object, aggregation and function result is a numbered citation that keeps the OSDK call behind it. Cited objects can be compared with current Foundry data, and answers can be checked claim by claim (citations exist, numbers appear in the cited sources, plus a model judge). Writes only appear as action proposals that Foundry validates and you approve; applied actions are logged. `pnpm mock:foundry` starts a local mock ontology for trying it out.
 - **Knowledge base management**: a file browser with per-file status (indexed / failed with reason / skipped), search and filters, content preview, original file, reprocess, delete or exclude, bulk actions, sync history, and editable language, chunking, vector size and scale (with automatic rebuild).
-- Tokenization management with an engine-accurate preview, 12 LLM providers, and a bilingual, IME-safe UI.
+- Tokenization management with an engine-accurate preview, 12 LLM providers, a bilingual, IME-safe UI, and light / dark themes (versions are listed under Settings → About).
 
 Quick start (Node.js 22.19+): `cp .env.example .env && docker compose up -d && pnpm install && pnpm dev`, download the embedding model under Settings → Embedding engine, then create a knowledge base on the Knowledge page. See [docs/DESIGN.md](docs/DESIGN.md) for the design (in Chinese).

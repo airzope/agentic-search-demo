@@ -1,6 +1,8 @@
-# 设计文档：CJK 搜索工作台
+# 设计文档：通用问答客户端
 
-> 第 1–9 节是第一版（分词、混合搜索、多模型问答）；第 10–16 节是第二版（大规模多分支知识库）；第 17–19 节是第三版（pi agent、内置 OCR、知识库管理）；第 20–24 节是第四版（Palantir OSDK 本体与可信推理）。
+> 原名「CJK 搜索工作台」，第五版起更名为「通用问答客户端」（General Q&A Client）。
+
+> 第 1–9 节是第一版（分词、混合搜索、多模型问答）；第 10–16 节是第二版（大规模多分支知识库）；第 17–19 节是第三版（pi agent、内置 OCR、知识库管理）；第 20–24 节是第四版（Palantir OSDK 本体与可信推理）；第 25 节是第五版（更名、深色主题、关于）。
 
 > 一个可本地运行、对中日韩（CJK）友好的搜索工作台：管理分词、混合搜索、接入主流大模型做问答。
 
@@ -37,7 +39,7 @@ Next.js Route Handlers（服务端，持有所有密钥）
 
 ```
 ┌────────────────┬──────────────────────────────────────────────┐
-│ ◆ CJK 搜索工作台 │  页面标题                         [操作按钮] │
+│ ◆ 通用问答客户端 │  页面标题                         [操作按钮] │
 │ [当前索引 ▾]    │ ─────────────────────────────────────────────│
 │                │                                              │
 │ 💬 问答         │                 页面内容                      │
@@ -361,3 +363,14 @@ pnpm install && pnpm dev      # http://localhost:3000
 - 批准后浏览器调用 `POST /api/ontology/<id>/actions`（`mode: "apply"`）：服务端再次检查连接是否允许动作，用 `$returnEdits` 执行，并把每次尝试（成功、校验失败、出错）写入 `.data/ontology-audit.jsonl`，在连接详情的「审计日志」中查看。决定结果保存在浏览器中，刷新后仍显示。
 
 **开发与测试**：`scripts/mock-foundry.mjs`（`pnpm mock:foundry`）实现了 OSDK 用到的 Ontology API v2 子集（本体与元数据、loadObjects、aggregate、queryTypes 与 execute、actionTypes 与 apply、OAuth 令牌端点），带一个中日韩数据的供应链本体。应用的连接、浏览、问答、核验、动作审批全流程都在它上面通过了端到端测试；真实 Foundry 环境中的权限、分页规模和对象类型差异需要在接入时再验证。
+
+# 第五版：更名、深色主题与关于
+
+新增需求：更名为「通用问答客户端」；添加暗色模式；Meilisearch 版本号放到设置或关于里；README 添加各页面和典型问答案例的截图。
+
+## 25. 主题与关于
+
+- **更名**：界面、页面标题和文档统一为「通用问答客户端 · General Q&A Client」。浏览器本地存储的键名（`cjk-studio.*`）保持不变，已有的对话、范围和偏好不受影响。
+- **主题**：浅色、深色、跟随系统三种。主题状态放在全局 `ThemeProvider` 中，侧栏底部（三个图标）、手机顶栏（循环切换按钮）和「设置 → 外观」共用同一状态；选「跟随系统」时监听 `prefers-color-scheme` 实时切换。`<head>` 中的脚本在首次绘制前设置 `dark` 类，避免闪烁；`color-scheme` 随主题切换，原生下拉框、滚动条和表单控件也使用对应配色。
+- **关于**：侧栏底部只显示检索服务是否正常，点击进入「设置 → 关于」。关于区块由 `GET /api/about` 提供：应用版本、每个 Meilisearch 实例的地址与版本（逐个连接检测）、Node.js 与平台、主要依赖（Next.js、pi agent、Palantir OSDK、Vercel AI SDK、Meilisearch JS、anydoc、PaddleOCR、ONNX Runtime、node-llama-cpp）的版本。
+- **截图**：README 中的截图存放在 `docs/screenshots/`，用演示数据、`pnpm mock:foundry` 的模拟本体和按脚本回答的模拟模型在生产构建上生成。

@@ -822,7 +822,7 @@ function ChatBody({
           <KbScopePicker ontologies />
           <NativeSelect
             aria-label={t("chat.model")}
-            className="min-w-0 flex-1 sm:w-52 sm:flex-none"
+            className="min-w-40 flex-1 sm:w-52 sm:flex-none"
             value={activeProvider.id}
             onChange={(event) => {
               setProviderId(event.target.value);

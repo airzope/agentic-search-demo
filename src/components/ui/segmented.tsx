@@ -13,7 +13,13 @@ function Segmented<T extends string>({
 }: {
   value: T;
   onChange: (value: T) => void;
-  options: { value: T; label: React.ReactNode; disabled?: boolean }[];
+  options: {
+    value: T;
+    label: React.ReactNode;
+    disabled?: boolean;
+    /** Accessible name and tooltip, for icon-only options. */
+    title?: string;
+  }[];
   className?: string;
   size?: "default" | "sm";
   "aria-label"?: string;
@@ -33,6 +39,8 @@ function Segmented<T extends string>({
           type="button"
           role="radio"
           aria-checked={value === option.value}
+          aria-label={option.title}
+          title={option.title}
           disabled={option.disabled}
           onClick={() => onChange(option.value)}
           className={cn(
