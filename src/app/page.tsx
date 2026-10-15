@@ -1,8 +1,5 @@
-import { MovieChat } from "@/components/movie-chat";
-import { getTopGenres } from "@/lib/categories";
+import { ChatView } from "@/components/views/chat-view";
 
-export default async function Page() {
-  const categories = await getTopGenres();
-
-  return <MovieChat categories={categories} />;
+export default function Page() {
+  return <ChatView />;
 }
